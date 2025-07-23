@@ -9,6 +9,10 @@ import time
 from datetime import datetime, timedelta
 import paramiko
 import logging
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.header import Header
 
 
 class WebsitePublisher:
@@ -26,7 +30,15 @@ class WebsitePublisher:
             'source_files': [],
             'delete_files': [],
             'servers': [],
-            'schedule_time': None
+            'schedule_time': None,
+            'smtp_config': {
+                'smtp_server': '',
+                'smtp_port': 587,
+                'username': '',
+                'password': '',
+                'use_tls': True
+            },
+            'notification_emails': []
         }
         
         # 定時器變量
@@ -77,6 +89,9 @@ class WebsitePublisher:
         
         # 設定頁面
         self.create_settings_tab(notebook)
+        
+        # SMTP設定頁面
+        self.create_smtp_tab(notebook)
         
         # 發布頁面
         self.create_publish_tab(notebook)
@@ -168,6 +183,88 @@ class WebsitePublisher:
         delete_frame.columnconfigure(0, weight=1)
         server_frame.columnconfigure(0, weight=1)
         settings_frame.columnconfigure(0, weight=1)
+        
+    def create_smtp_tab(self, notebook):
+        smtp_frame = ttk.Frame(notebook, padding="10")
+        notebook.add(smtp_frame, text="郵件通知")
+        
+        # SMTP設定區域
+        smtp_label = ttk.Label(smtp_frame, text="SMTP伺服器設定:", font=('Arial', 10, 'bold'))
+        smtp_label.grid(row=0, column=0, sticky=tk.W, pady=(0, 10))
+        
+        smtp_config_frame = ttk.LabelFrame(smtp_frame, text="SMTP設定", padding="10")
+        smtp_config_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 20))
+        
+        # SMTP伺服器
+        ttk.Label(smtp_config_frame, text="SMTP伺服器:").grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
+        self.smtp_server_var = tk.StringVar()
+        ttk.Entry(smtp_config_frame, textvariable=self.smtp_server_var, width=50).grid(row=0, column=1, sticky=(tk.W, tk.E), pady=(0, 5), padx=(10, 0))
+        
+        # SMTP埠號
+        ttk.Label(smtp_config_frame, text="埠號:").grid(row=1, column=0, sticky=tk.W, pady=(0, 5))
+        self.smtp_port_var = tk.StringVar(value="587")
+        ttk.Entry(smtp_config_frame, textvariable=self.smtp_port_var, width=10).grid(row=1, column=1, sticky=tk.W, pady=(0, 5), padx=(10, 0))
+        
+        # 使用者名稱
+        ttk.Label(smtp_config_frame, text="使用者名稱:").grid(row=2, column=0, sticky=tk.W, pady=(0, 5))
+        self.smtp_username_var = tk.StringVar()
+        ttk.Entry(smtp_config_frame, textvariable=self.smtp_username_var, width=50).grid(row=2, column=1, sticky=(tk.W, tk.E), pady=(0, 5), padx=(10, 0))
+        
+        # 密碼
+        ttk.Label(smtp_config_frame, text="密碼:").grid(row=3, column=0, sticky=tk.W, pady=(0, 5))
+        
+        password_frame = ttk.Frame(smtp_config_frame)
+        password_frame.grid(row=3, column=1, sticky=(tk.W, tk.E), pady=(0, 5), padx=(10, 0))
+        
+        self.smtp_password_var = tk.StringVar()
+        self.smtp_password_entry = ttk.Entry(password_frame, textvariable=self.smtp_password_var, width=35, show="*")
+        self.smtp_password_entry.grid(row=0, column=0, sticky=(tk.W, tk.E))
+        
+        self.show_smtp_password_var = tk.BooleanVar()
+        ttk.Checkbutton(password_frame, text="顯示", variable=self.show_smtp_password_var, 
+                       command=self.toggle_smtp_password).grid(row=0, column=1, padx=(5, 0))
+        password_frame.columnconfigure(0, weight=1)
+        
+        # TLS設定
+        ttk.Label(smtp_config_frame, text="使用TLS:").grid(row=4, column=0, sticky=tk.W, pady=(0, 10))
+        self.use_tls_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(smtp_config_frame, variable=self.use_tls_var).grid(row=4, column=1, sticky=tk.W, pady=(0, 10), padx=(10, 0))
+        
+        # SMTP測試按鈕
+        smtp_test_frame = ttk.Frame(smtp_config_frame)
+        smtp_test_frame.grid(row=5, column=0, columnspan=2, pady=(10, 0))
+        
+        ttk.Button(smtp_test_frame, text="儲存SMTP設定", command=self.save_smtp_config).grid(row=0, column=0, padx=(0, 10))
+        ttk.Button(smtp_test_frame, text="測試SMTP連接", command=self.test_smtp_connection).grid(row=0, column=1)
+        
+        # 通知人員名單
+        notify_label = ttk.Label(smtp_frame, text="通知人員名單:", font=('Arial', 10, 'bold'))
+        notify_label.grid(row=2, column=0, sticky=tk.W, pady=(20, 5))
+        
+        notify_frame = ttk.Frame(smtp_frame)
+        notify_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        
+        self.notify_listbox = tk.Listbox(notify_frame, height=4)
+        self.notify_listbox.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        notify_scroll = ttk.Scrollbar(notify_frame, orient=tk.VERTICAL, command=self.notify_listbox.yview)
+        notify_scroll.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        self.notify_listbox.configure(yscrollcommand=notify_scroll.set)
+        
+        notify_btn_frame = ttk.Frame(notify_frame)
+        notify_btn_frame.grid(row=0, column=2, padx=(10, 0), sticky=tk.N)
+        
+        self.email_entry = ttk.Entry(notify_btn_frame, width=25)
+        self.email_entry.grid(row=0, column=0, pady=(0, 5))
+        
+        ttk.Button(notify_btn_frame, text="新增", command=self.add_notification_email).grid(row=1, column=0, pady=(0, 5))
+        ttk.Button(notify_btn_frame, text="測試郵件", command=self.test_email_to_selected).grid(row=2, column=0, pady=(0, 5))
+        ttk.Button(notify_btn_frame, text="移除", command=self.remove_notification_email).grid(row=3, column=0)
+        
+        # 設定權重
+        smtp_config_frame.columnconfigure(1, weight=1)
+        notify_frame.columnconfigure(0, weight=1)
+        smtp_frame.columnconfigure(0, weight=1)
         
     def create_publish_tab(self, notebook):
         publish_frame = ttk.Frame(notebook, padding="10")
@@ -402,6 +499,142 @@ class WebsitePublisher:
             self.delete_listbox.delete(index)
             del self.config['delete_files'][index]
             self.save_config()
+    
+    def toggle_smtp_password(self):
+        if self.show_smtp_password_var.get():
+            self.smtp_password_entry.configure(show="")
+        else:
+            self.smtp_password_entry.configure(show="*")
+    
+    def save_smtp_config(self):
+        if not self.smtp_server_var.get() or not self.smtp_username_var.get() or not self.smtp_password_var.get():
+            messagebox.showwarning("警告", "請填寫完整的SMTP設定")
+            return
+        
+        try:
+            port = int(self.smtp_port_var.get())
+        except ValueError:
+            messagebox.showerror("錯誤", "埠號必須是數字")
+            return
+        
+        self.config['smtp_config'] = {
+            'smtp_server': self.smtp_server_var.get(),
+            'smtp_port': port,
+            'username': self.smtp_username_var.get(),
+            'password': self.smtp_password_var.get(),
+            'use_tls': self.use_tls_var.get()
+        }
+        self.save_config()
+        messagebox.showinfo("成功", "SMTP設定已儲存")
+    
+    def test_smtp_connection(self):
+        if not self.smtp_server_var.get() or not self.smtp_username_var.get() or not self.smtp_password_var.get():
+            messagebox.showwarning("警告", "請先填寫SMTP設定")
+            return
+        
+        test_thread = threading.Thread(target=self._test_smtp_worker)
+        test_thread.daemon = True
+        test_thread.start()
+    
+    def _test_smtp_worker(self):
+        self.status_var.set("正在測試SMTP連接...")
+        
+        try:
+            smtp_config = {
+                'smtp_server': self.smtp_server_var.get(),
+                'smtp_port': int(self.smtp_port_var.get()),
+                'username': self.smtp_username_var.get(),
+                'password': self.smtp_password_var.get(),
+                'use_tls': self.use_tls_var.get()
+            }
+            
+            server = smtplib.SMTP(smtp_config['smtp_server'], smtp_config['smtp_port'])
+            if smtp_config['use_tls']:
+                server.starttls()
+            server.login(smtp_config['username'], smtp_config['password'])
+            server.quit()
+            
+            self.status_var.set("SMTP測試完成")
+            self.root.after(0, lambda: messagebox.showinfo("SMTP測試", "SMTP連接測試成功！"))
+            self.logger.info("SMTP連接測試成功")
+            
+        except Exception as e:
+            error_msg = f"SMTP連接失敗: {str(e)}"
+            self.status_var.set("SMTP測試失敗")
+            self.root.after(0, lambda: messagebox.showerror("SMTP測試失敗", error_msg))
+            self.logger.error(f"SMTP連接測試失敗: {str(e)}")
+    
+    def add_notification_email(self):
+        email = self.email_entry.get().strip()
+        if email:
+            if '@' not in email:
+                messagebox.showerror("錯誤", "請輸入正確的電子郵件地址")
+                return
+            
+            if email not in self.config['notification_emails']:
+                self.config['notification_emails'].append(email)
+                self.notify_listbox.insert(tk.END, email)
+                self.email_entry.delete(0, tk.END)
+                self.save_config()
+            else:
+                messagebox.showwarning("警告", "此電子郵件地址已存在")
+    
+    def remove_notification_email(self):
+        selection = self.notify_listbox.curselection()
+        if selection:
+            index = selection[0]
+            self.notify_listbox.delete(index)
+            del self.config['notification_emails'][index]
+            self.save_config()
+    
+    def test_email_to_selected(self):
+        selection = self.notify_listbox.curselection()
+        if not selection:
+            messagebox.showwarning("警告", "請先選擇要測試的電子郵件地址")
+            return
+        
+        index = selection[0]
+        test_email = self.config['notification_emails'][index]
+        
+        test_thread = threading.Thread(target=self._test_email_worker, args=(test_email,))
+        test_thread.daemon = True
+        test_thread.start()
+    
+    def _test_email_worker(self, test_email):
+        self.status_var.set(f"正在發送測試郵件到 {test_email}...")
+        
+        try:
+            if not self.config['smtp_config']['smtp_server']:
+                self.root.after(0, lambda: messagebox.showerror("錯誤", "請先設定並儲存SMTP設定"))
+                return
+            
+            subject = f"網站發布助手測試郵件 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            content = f"""這是一封來自網站發布助手的測試郵件。
+
+測試時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+收件者: {test_email}
+
+如果您收到此郵件，表示SMTP設定正確，系統可以正常發送通知郵件。
+
+系統資訊:
+- 發送時間: {datetime.now()}
+- SMTP伺服器: {self.config['smtp_config']['smtp_server']}
+- 使用TLS: {'是' if self.config['smtp_config']['use_tls'] else '否'}
+
+此為系統自動發送的測試郵件，請勿回覆。
+"""
+            
+            self._send_email([test_email], subject, content)
+            
+            self.status_var.set("測試郵件發送完成")
+            self.root.after(0, lambda: messagebox.showinfo("成功", f"測試郵件已發送到 {test_email}"))
+            self.logger.info(f"測試郵件發送成功: {test_email}")
+            
+        except Exception as e:
+            error_msg = f"測試郵件發送失敗: {str(e)}"
+            self.status_var.set("測試郵件發送失敗")
+            self.root.after(0, lambda: messagebox.showerror("發送失敗", error_msg))
+            self.logger.error(f"測試郵件發送失敗: {str(e)}")
             
     def add_server(self):
         server_dialog = ServerDialog(self.root)
@@ -666,6 +899,10 @@ class WebsitePublisher:
             self.logger.info(f"=== 發布作業完成 ===")
             self.logger.info(f"成功發布到 {success_count}/{len(self.config['servers'])} 個伺服器")
             self.logger.info(f"總耗時: {total_duration:.2f} 秒")
+            
+            # 發送成功通知郵件
+            self._send_deployment_notification(True, start_time, end_time)
+            
             self.root.after(0, self._show_success_message)
             
         except Exception as e:
@@ -678,6 +915,10 @@ class WebsitePublisher:
             self.logger.error(f"錯誤訊息: {error_msg}")
             self.logger.error(f"失敗時間: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
             self.logger.error(f"已執行時間: {total_duration:.2f} 秒")
+            
+            # 發送失敗通知郵件
+            self._send_deployment_notification(False, start_time, end_time, error_msg)
+            
             self.root.after(0, lambda msg=error_msg: self._show_error_message(msg))
             
     def _show_success_message(self):
@@ -685,6 +926,136 @@ class WebsitePublisher:
         
     def _show_error_message(self, error_msg):
         messagebox.showerror("錯誤", f"發布失敗: {error_msg}")
+    
+    def _send_email(self, recipients, subject, content):
+        """發送電子郵件"""
+        if not self.config['smtp_config']['smtp_server'] or not recipients:
+            return
+        
+        try:
+            smtp_config = self.config['smtp_config']
+            
+            # 創建郵件
+            msg = MIMEMultipart()
+            msg['From'] = smtp_config['username']
+            msg['To'] = ', '.join(recipients)
+            msg['Subject'] = Header(subject, 'utf-8')
+            
+            # 添加郵件內容
+            msg.attach(MIMEText(content, 'plain', 'utf-8'))
+            
+            # 發送郵件
+            server = smtplib.SMTP(smtp_config['smtp_server'], smtp_config['smtp_port'])
+            if smtp_config['use_tls']:
+                server.starttls()
+            server.login(smtp_config['username'], smtp_config['password'])
+            server.send_message(msg)
+            server.quit()
+            
+            self.logger.info(f"郵件發送成功，收件者: {', '.join(recipients)}")
+            
+        except Exception as e:
+            self.logger.error(f"郵件發送失敗: {str(e)}")
+    
+    def _send_deployment_notification(self, is_success, start_time, end_time, error_msg=None):
+        """發送部署結果通知郵件"""
+        if not self.config['notification_emails'] or not self.config['smtp_config']['smtp_server']:
+            return
+        
+        # 只對定時發布發送郵件通知
+        if not self.config.get('schedule_time'):
+            return
+        
+        try:
+            date_str = datetime.now().strftime('%Y-%m-%d')
+            status = "成功" if is_success else "失敗"
+            subject = f"網站發布通知 - {date_str} - {status}"
+            
+            # 讀取日誌檔案內容
+            log_content = ""
+            try:
+                log_file = f'logs/publish_{datetime.now().strftime("%Y%m%d")}.log'
+                if os.path.exists(log_file):
+                    with open(log_file, 'r', encoding='utf-8') as f:
+                        lines = f.readlines()
+                        # 獲取最近的發布日誌（從開始時間之後的日誌）
+                        relevant_lines = []
+                        for line in lines:
+                            if start_time.strftime('%Y-%m-%d %H:%M') in line:
+                                relevant_lines = lines[lines.index(line):]
+                                break
+                        log_content = ''.join(relevant_lines[-50:])  # 最後50行
+            except Exception as e:
+                log_content = f"無法讀取日誌檔案: {str(e)}"
+            
+            duration = (end_time - start_time).total_seconds()
+            
+            content = f"""網站發布助手自動部署通知
+
+部署狀態: {status}
+部署日期: {date_str}
+開始時間: {start_time.strftime('%Y-%m-%d %H:%M:%S')}
+結束時間: {end_time.strftime('%Y-%m-%d %H:%M:%S')}
+執行時間: {duration:.2f} 秒
+目標伺服器數量: {len(self.config['servers'])}
+
+"""
+            
+            if error_msg:
+                content += f"錯誤訊息: {error_msg}\n\n"
+            
+            content += f"""伺服器列表:
+"""
+            for i, server in enumerate(self.config['servers'], 1):
+                content += f"{i}. {server['ip']} - {server['path']}\n"
+            
+            content += f"""
+
+發布日誌:
+==========================================
+{log_content}
+==========================================
+
+此為系統自動發送的通知郵件。
+網站發布助手 v2.0
+"""
+            
+            # 發送郵件
+            self._send_email(self.config['notification_emails'], subject, content)
+            self.logger.info(f"部署通知郵件已發送給 {len(self.config['notification_emails'])} 位收件者")
+            
+        except Exception as e:
+            self.logger.error(f"發送部署通知郵件失敗: {str(e)}")
+    
+    def _send_error_notification(self, error_type, error_msg):
+        """發送程式異常通知郵件"""
+        if not self.config['notification_emails'] or not self.config['smtp_config']['smtp_server']:
+            return
+        
+        try:
+            date_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            subject = f"網站發布助手異常通知 - {error_type} - {date_str}"
+            
+            content = f"""網站發布助手程式異常通知
+
+異常類型: {error_type}
+發生時間: {date_str}
+錯誤訊息: {error_msg}
+
+程式狀態: 異常終止
+
+請檢查系統狀態並重新啟動程式。
+
+此為系統自動發送的異常通知郵件。
+網站發布助手 v2.0
+"""
+            
+            # 發送郵件
+            self._send_email(self.config['notification_emails'], subject, content)
+            self.logger.error(f"異常通知郵件已發送: {error_type}")
+            
+        except Exception as e:
+            self.logger.error(f"發送異常通知郵件失敗: {str(e)}")
             
     def _publish_to_server(self, server):
         ssh = paramiko.SSHClient()
@@ -881,7 +1252,22 @@ class WebsitePublisher:
         try:
             if os.path.exists('config.json'):
                 with open('config.json', 'r', encoding='utf-8') as f:
-                    self.config = json.load(f)
+                    loaded_config = json.load(f)
+                    # 合併配置，確保新鍵不會丟失
+                    for key, value in loaded_config.items():
+                        self.config[key] = value
+                    
+                    # 確保所有必要的鍵都存在
+                    if 'notification_emails' not in self.config:
+                        self.config['notification_emails'] = []
+                    if 'smtp_config' not in self.config:
+                        self.config['smtp_config'] = {
+                            'smtp_server': '',
+                            'smtp_port': 587,
+                            'username': '',
+                            'password': '',
+                            'use_tls': True
+                        }
                     
                 # 清空現有GUI內容
                 self.source_listbox.delete(0, tk.END)
@@ -900,6 +1286,20 @@ class WebsitePublisher:
                     
                 # 更新伺服器顯示
                 self.update_server_display()
+                
+                # 載入SMTP設定
+                smtp_config = self.config.get('smtp_config', {})
+                if hasattr(self, 'smtp_server_var'):
+                    self.smtp_server_var.set(smtp_config.get('smtp_server', ''))
+                    self.smtp_port_var.set(str(smtp_config.get('smtp_port', 587)))
+                    self.smtp_username_var.set(smtp_config.get('username', ''))
+                    self.smtp_password_var.set(smtp_config.get('password', ''))
+                    self.use_tls_var.set(smtp_config.get('use_tls', True))
+                
+                # 載入通知人員名單
+                if hasattr(self, 'notify_listbox'):
+                    for email in self.config.get('notification_emails', []):
+                        self.notify_listbox.insert(tk.END, email)
                     
                 # 恢復定時設定
                 if self.config.get('schedule_time'):
@@ -926,6 +1326,12 @@ class WebsitePublisher:
     def run(self):
         try:
             self.root.mainloop()
+        except Exception as e:
+            error_msg = str(e)
+            self.logger.error(f"程式異常終止: {error_msg}")
+            # 發送異常通知郵件
+            self._send_error_notification("程式異常終止", error_msg)
+            raise
         finally:
             if self.publish_timer:
                 self.publish_timer.cancel()
@@ -1080,5 +1486,15 @@ class ServerDialog:
 
 
 if __name__ == "__main__":
-    app = WebsitePublisher()
-    app.run()
+    try:
+        app = WebsitePublisher()
+        app.run()
+    except KeyboardInterrupt:
+        print("程式被使用者中斷")
+        if 'app' in locals():
+            app._send_error_notification("使用者中斷", "程式被使用者手動中斷 (Ctrl+C)")
+    except Exception as e:
+        print(f"程式發生未預期的錯誤: {e}")
+        if 'app' in locals():
+            app._send_error_notification("未預期的錯誤", str(e))
+        raise

@@ -15,6 +15,7 @@ Website Publishing Assistant is a desktop application for automated website depl
 - 🔍 **File Conflict Detection** - Check for local file conflicts before deployment
 - 📊 **Detailed Logging** - Comprehensive deployment process logging for troubleshooting
 - 💾 **Configuration Persistence** - Automatically save all settings, restore after restart
+- 📧 **SMTP Email Notifications** - Automatic email notifications after scheduled deployments with deployment results and logs
 
 ## System Requirements
 
@@ -87,6 +88,43 @@ Use PyInstaller to package the application as a standalone executable:
 4. Multiple servers can be added; select and click "Remove" to delete or "Edit" to modify
 5. Click "Test Connection" to verify server connectivity
 
+#### 1.4 Configure SMTP Email Notifications
+1. Switch to the "SMTP Settings" tab
+2. Configure SMTP server information:
+   - **SMTP Server**: Mail server address (e.g., smtp.gmail.com)
+   - **SMTP Port**: Server port number (default 587)
+   - **Username**: Email account
+   - **Password**: Email password or app password
+   - **Use TLS**: Enable TLS encryption (recommended)
+3. Click "Save SMTP Settings" to save configuration
+4. Click "Test SMTP Connection" to verify mail server connectivity
+
+**Google Gmail Setup Instructions**:
+If using Gmail, follow these steps:
+1. Enable "2-Step Verification" for your Google account
+2. Go to Google Account Settings → Security → App passwords
+3. Generate a new app password (16-character alphanumeric combination)
+4. Enter the app password in the "Password" field, not your Google account password
+5. SMTP Settings:
+   - SMTP Server: `smtp.gmail.com`
+   - SMTP Port: `587`
+   - Use TLS: `Enabled`
+
+**Common Error Troubleshooting**:
+- Ensure Gmail address format is correct (e.g., user@gmail.com)
+- Enter app password without spaces (16 consecutive characters)
+- If you get "Username and Password not accepted" error:
+  1. Check that 2-Step Verification is enabled
+  2. Generate a new app password
+  3. Confirm you're using the app password, not your regular password
+
+#### 1.5 Configure Notification Recipients
+1. In the "Notification Recipients Management" area
+2. Enter recipient email address in the text field
+3. Click "Add Recipient" button
+4. Multiple recipients can be added; select and click "Remove Recipient" to delete
+5. Select a specific recipient and click "Send Test Email" to test email functionality
+
 ### 2. Publishing Operations
 
 #### 2.1 Immediate Publishing
@@ -105,6 +143,12 @@ Use PyInstaller to package the application as a standalone executable:
    - Countdown timer
    - Target server list
 6. To cancel, click "Cancel Schedule"
+
+**Important Notes**:
+- Only scheduled publishing will automatically send email notifications; immediate publishing does not send notifications
+- Email subject format: Publishing date + Success/Failure status
+- Email content includes complete deployment process logs
+- Error notification emails are automatically sent when the program terminates abnormally
 
 ### 3. Merge-Based Deployment Process
 
@@ -162,7 +206,15 @@ The application automatically creates a `config.json` file in the execution dire
       "port": 22
     }
   ],
-  "schedule_time": "scheduled publishing time (ISO format)"
+  "schedule_time": "scheduled publishing time (ISO format)",
+  "smtp_config": {
+    "smtp_server": "SMTP server address",
+    "smtp_port": 587,
+    "username": "email account",
+    "password": "email password",
+    "use_tls": true
+  },
+  "notification_emails": ["list of recipient email addresses"]
 }
 ```
 
@@ -229,6 +281,13 @@ The application creates log files in the `logs` directory:
    - Use "Test Delete Files" function for diagnosis
    - Check file paths and names are correct
    - Confirm local file existence
+
+6. **SMTP Email Sending Failure**
+   - Check SMTP server settings are correct
+   - Confirm username and password are correct (Gmail requires app password)
+   - Check network connection and firewall settings
+   - Ensure TLS settings match server requirements
+   - Use "Test SMTP Connection" function to diagnose issues
 
 ### Error Logs
 
