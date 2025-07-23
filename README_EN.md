@@ -86,7 +86,13 @@ Use PyInstaller to package the application as a standalone executable:
    - **SSH Port**: SSH connection port (default 22)
 3. Click "OK" to save
 4. Multiple servers can be added; select and click "Remove" to delete or "Edit" to modify
-5. Click "Test Connection" to verify server connectivity
+5. Click "Test Connection" to verify server connectivity and folder structure
+
+**Test Connection Feature Description**:
+- Test SSH connection functionality
+- Check if the target path exists
+- Verify that the target path contains all project folders corresponding to source files
+- If required folders are missing, users will be notified and advised to perform a deployment first
 
 #### 1.4 Configure SMTP Email Notifications
 1. Switch to the "SMTP Settings" tab
@@ -288,6 +294,12 @@ The application creates log files in the `logs` directory:
    - Check network connection and firewall settings
    - Ensure TLS settings match server requirements
    - Use "Test SMTP Connection" function to diagnose issues
+
+7. **Incomplete Server Folder Structure**
+   - Test connection shows missing project folders
+   - Perform a complete deployment to establish correct folder structure
+   - Check source files configuration is correct
+   - Ensure target path permissions allow creating new folders
 
 ### Error Logs
 

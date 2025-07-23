@@ -6,3 +6,6 @@
 /venv
 /__pycache__
 /提示工程.md
+/build
+/dist
+網站發布助手.spec

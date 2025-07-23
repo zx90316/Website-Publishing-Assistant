@@ -723,16 +723,24 @@ class WebsitePublisher:
                     except UnicodeDecodeError:
                         path_result = stdout_bytes.decode('latin-1').strip()  # 最後備選
             
-            ssh.close()
-            
             if "PATH_NOT_EXISTS" in path_result:
                 message = f"連接成功！\n但目標路徑不存在: {server['path']}\n建議檢查路徑設定"
                 self.logger.warning(f"連接成功但路徑不存在: {server['ip']} - {server['path']}")
+                ssh.close()
                 self.root.after(0, lambda: messagebox.showwarning("連接測試", message))
             else:
-                message = f"連接測試成功！\n伺服器: {server['ip']}\n目標路徑: {server['path']}\n狀態: 正常"
-                self.logger.info(f"連接測試成功: {server['ip']}")
-                self.root.after(0, lambda: messagebox.showinfo("連接測試", message))
+                # 基本連接和路徑測試成功，進行資料夾結構檢查
+                folder_check_result = self._check_target_folders(ssh, server)
+                ssh.close()
+                
+                if folder_check_result['success']:
+                    message = f"連接測試成功！\n伺服器: {server['ip']}\n目標路徑: {server['path']}\n資料夾結構: 正確\n狀態: 正常"
+                    self.logger.info(f"連接測試成功: {server['ip']}")
+                    self.root.after(0, lambda: messagebox.showinfo("連接測試", message))
+                else:
+                    message = f"連接成功但資料夾結構不完整！\n伺服器: {server['ip']}\n目標路徑: {server['path']}\n\n缺少的資料夾:\n{folder_check_result['missing_folders']}\n\n建議先執行一次發布以建立正確的資料夾結構"
+                    self.logger.warning(f"連接成功但資料夾結構不完整: {server['ip']} - 缺少: {folder_check_result['missing_folders']}")
+                    self.root.after(0, lambda: messagebox.showwarning("資料夾結構檢查", message))
                 
             self.status_var.set("連接測試完成")
             
@@ -753,6 +761,76 @@ class WebsitePublisher:
             self.logger.error(f"連接測試失敗: {server['ip']} - {str(e)}")
             self.root.after(0, lambda: messagebox.showerror("連接測試失敗", error_msg))
             self.status_var.set("連接測試失敗")
+    
+    def _check_target_folders(self, ssh, server):
+        """檢查目標伺服器上是否包含所有源檔案對應的資料夾"""
+        result = {
+            'success': True,
+            'missing_folders': []
+        }
+        
+        try:
+            # 獲取所有源檔案的專案名稱
+            expected_folders = []
+            for source_path in self.config.get('source_files', []):
+                if os.path.isdir(source_path):
+                    folder_name = os.path.basename(source_path)
+                    expected_folders.append(folder_name)
+                elif os.path.isfile(source_path):
+                    # 如果是檔案，使用其父目錄名稱
+                    folder_name = os.path.basename(os.path.dirname(source_path))
+                    if folder_name not in expected_folders:
+                        expected_folders.append(folder_name)
+            
+            if not expected_folders:
+                # 如果沒有源檔案設定，跳過檢查
+                return result
+            
+            # 檢查目標路徑下的資料夾
+            target_path = server['path']
+            if '\\' in target_path:
+                # Windows路徑
+                command = f'dir "{target_path}" /b /ad 2>nul'
+            else:
+                # Linux路徑
+                command = f'ls -d "{target_path}"/*/ 2>/dev/null | xargs -n 1 basename'
+            
+            stdin, stdout, stderr = ssh.exec_command(command)
+            stdout_bytes = stdout.read()
+            
+            # 處理編碼問題
+            try:
+                folder_list_str = stdout_bytes.decode('utf-8').strip()
+            except UnicodeDecodeError:
+                try:
+                    folder_list_str = stdout_bytes.decode('cp950').strip()
+                except UnicodeDecodeError:
+                    try:
+                        folder_list_str = stdout_bytes.decode('gbk').strip()
+                    except UnicodeDecodeError:
+                        folder_list_str = stdout_bytes.decode('latin-1').strip()
+            
+            # 解析現有資料夾列表
+            existing_folders = []
+            if folder_list_str:
+                existing_folders = [folder.strip() for folder in folder_list_str.split('\n') if folder.strip()]
+            
+            # 檢查缺少的資料夾
+            for expected_folder in expected_folders:
+                if expected_folder not in existing_folders:
+                    result['missing_folders'].append(expected_folder)
+                    result['success'] = False
+            
+            # 格式化缺少的資料夾列表
+            if result['missing_folders']:
+                result['missing_folders'] = '\n'.join([f"• {folder}" for folder in result['missing_folders']])
+            
+        except Exception as e:
+            self.logger.error(f"資料夾結構檢查失敗: {server['ip']} - {str(e)}")
+            result['success'] = False
+            result['missing_folders'] = f"檢查過程發生錯誤: {str(e)}"
+        
+        return result
             
     def remove_server(self):
         selection = self.server_listbox.curselection()
