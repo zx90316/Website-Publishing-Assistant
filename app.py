@@ -6,8 +6,9 @@ import os
 import shutil
 import threading
 import time
+import subprocess
+import sys
 from datetime import datetime, timedelta
-import paramiko
 import logging
 import smtplib
 from email.mime.text import MIMEText
@@ -19,7 +20,7 @@ class WebsitePublisher:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("網站發布助手")
-        self.root.geometry("800x600")
+        self.root.geometry("900x800")
         self.root.configure(bg='#f0f0f0')
         
         # 設置LOG記錄
@@ -52,6 +53,26 @@ class WebsitePublisher:
         # 載入配置
         self.load_config()
         
+        # 設置GUI日誌處理器
+        self.setup_gui_logging()
+        
+        # 初始化進度相關變數
+        self.total_files = 0
+        self.processed_files = 0
+        
+        # 初始化發布報告變數
+        self.publish_report = {
+            'servers': {},
+            'start_time': None,
+            'end_time': None,
+            'total_stats': {
+                'new_files': 0,
+                'updated_files': 0,
+                'skipped_files': 0,
+                'deleted_files': 0
+            }
+        }
+        
     def setup_logging(self):
         """設置LOG記錄"""
         # 創建logs目錄
@@ -72,6 +93,10 @@ class WebsitePublisher:
         )
         
         self.logger = logging.getLogger(__name__)
+        
+        # 添加GUI日誌處理器（稍後在create_gui後設置）
+        self.gui_log_handler = None
+        
         self.logger.info("網站發布助手啟動")
         
     def create_gui(self):
@@ -95,6 +120,9 @@ class WebsitePublisher:
         
         # 發布頁面
         self.create_publish_tab(notebook)
+        
+        # 發布歷史頁面
+        self.create_history_tab(notebook)
         
         # 狀態欄
         self.status_var = tk.StringVar(value="就緒")
@@ -329,13 +357,201 @@ class WebsitePublisher:
         # 手動發布按鈕
         ttk.Button(publish_frame, text="立即發布", command=self.publish_now, style='Accent.TButton').grid(row=3, column=0, columnspan=2, pady=20)
         
+        # 進度和控制台顯示
+        progress_frame = ttk.LabelFrame(publish_frame, text="發布進度與狀態", padding="10")
+        progress_frame.grid(row=4, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+        
+        # 進度條
+        progress_label_frame = ttk.Frame(progress_frame)
+        progress_label_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        
+        ttk.Label(progress_label_frame, text="總體進度:").grid(row=0, column=0, sticky=tk.W)
+        self.progress_label = ttk.Label(progress_label_frame, text="0 / 0 (0%)")
+        self.progress_label.grid(row=0, column=1, sticky=tk.W, padx=(10, 0))
+        
+        self.progress_bar = ttk.Progressbar(progress_frame, mode='determinate')
+        self.progress_bar.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        
+        # 控制台輸出
+        ttk.Label(progress_frame, text="發布日誌:").grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(10, 5))
+        
+        console_frame = ttk.Frame(progress_frame)
+        console_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+        
+        self.console_text = tk.Text(console_frame, height=15, wrap=tk.WORD, state='disabled',
+                                   bg='#1e1e1e', fg='#ffffff', font=('Consolas', 9))
+        self.console_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        console_scroll = ttk.Scrollbar(console_frame, orient=tk.VERTICAL, command=self.console_text.yview)
+        console_scroll.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        self.console_text.configure(yscrollcommand=console_scroll.set)
+        
+        # 清除日誌按鈕
+        ttk.Button(progress_frame, text="清除日誌", command=self.clear_console).grid(row=4, column=0, columnspan=2, pady=(5, 0))
+        
         # 設定權重
         publish_frame.columnconfigure(0, weight=1)
+        publish_frame.rowconfigure(4, weight=1)
         status_frame.columnconfigure(1, weight=1)
+        progress_frame.columnconfigure(0, weight=1)
+        progress_frame.rowconfigure(3, weight=1)
+        console_frame.columnconfigure(0, weight=1)
+        console_frame.rowconfigure(0, weight=1)
         
         # 更新伺服器顯示
         self.update_server_display()
+    
+    def create_history_tab(self, notebook):
+        """創建發布歷史頁面"""
+        history_frame = ttk.Frame(notebook, padding="10")
+        notebook.add(history_frame, text="發布歷史")
         
+        # 標題
+        title_label = ttk.Label(history_frame, text="發布歷史記錄", font=('Arial', 12, 'bold'))
+        title_label.grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+        
+        # 控制按鈕區域
+        control_frame = ttk.Frame(history_frame)
+        control_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        
+        ttk.Button(control_frame, text="刷新記錄", command=self.refresh_history).grid(row=0, column=0, padx=(0, 10))
+        ttk.Button(control_frame, text="清除所有記錄", command=self.clear_all_history).grid(row=0, column=1, padx=(0, 10))
+        ttk.Button(control_frame, text="刪除選中記錄", command=self.delete_selected_history).grid(row=0, column=2)
+        
+        # 歷史記錄列表
+        list_frame = ttk.LabelFrame(history_frame, text="歷史記錄", padding="10")
+        list_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+        
+        # 創建Treeview顯示歷史記錄
+        columns = ('發布時間', '耗時', '伺服器數量', '總檔案操作', '狀態')
+        self.history_tree = ttk.Treeview(list_frame, columns=columns, show='headings', height=12)
+        self.history_tree.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # 設置列標題
+        self.history_tree.heading('發布時間', text='發布時間')
+        self.history_tree.heading('耗時', text='耗時(秒)')
+        self.history_tree.heading('伺服器數量', text='伺服器數量')
+        self.history_tree.heading('總檔案操作', text='總檔案操作')
+        self.history_tree.heading('狀態', text='狀態')
+        
+        # 設置列寬
+        self.history_tree.column('發布時間', width=150)
+        self.history_tree.column('耗時', width=80)
+        self.history_tree.column('伺服器數量', width=100)
+        self.history_tree.column('總檔案操作', width=120)
+        self.history_tree.column('狀態', width=80)
+        
+        # 添加滾動條
+        history_scroll = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.history_tree.yview)
+        history_scroll.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        self.history_tree.configure(yscrollcommand=history_scroll.set)
+        
+        # 綁定雙擊事件查看詳細報告
+        self.history_tree.bind('<Double-1>', self.view_history_detail)
+        
+        # 詳細信息區域
+        detail_frame = ttk.LabelFrame(history_frame, text="發布詳情 (雙擊上方記錄查看詳細資訊)", padding="10")
+        detail_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+        
+        # 詳細信息顯示區域
+        self.history_detail_text = tk.Text(detail_frame, height=10, wrap=tk.WORD, state='disabled',
+                                          bg='#f8f9fa', font=('Consolas', 9))
+        self.history_detail_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        detail_scroll = ttk.Scrollbar(detail_frame, orient=tk.VERTICAL, command=self.history_detail_text.yview)
+        detail_scroll.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        self.history_detail_text.configure(yscrollcommand=detail_scroll.set)
+        
+        # 設定權重
+        history_frame.columnconfigure(0, weight=1)
+        history_frame.rowconfigure(2, weight=1)
+        history_frame.rowconfigure(3, weight=1)
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+        detail_frame.columnconfigure(0, weight=1)
+        detail_frame.rowconfigure(0, weight=1)
+        
+        # 初始化載入歷史記錄
+        self.load_history_records()
+    
+    def setup_gui_logging(self):
+        """設置GUI日誌處理器"""
+        class GUILogHandler(logging.Handler):
+            def __init__(self, console_widget, root):
+                super().__init__()
+                self.console_widget = console_widget
+                self.root = root
+            
+            def emit(self, record):
+                # 在主線程中更新GUI
+                self.root.after(0, self._update_console, self.format(record))
+            
+            def _update_console(self, message):
+                # 啟用文字框編輯
+                self.console_widget.config(state='normal')
+                
+                # 添加時間戳和訊息
+                timestamp = datetime.now().strftime('%H:%M:%S')
+                formatted_message = f"[{timestamp}] {message}\n"
+                
+                # 插入訊息
+                self.console_widget.insert(tk.END, formatted_message)
+                
+                # 自動滾動到底部
+                self.console_widget.see(tk.END)
+                
+                # 禁用文字框編輯
+                self.console_widget.config(state='disabled')
+                
+                # 限制最大行數（保留最後1000行）
+                lines = int(self.console_widget.index('end-1c').split('.')[0])
+                if lines > 1000:
+                    self.console_widget.config(state='normal')
+                    self.console_widget.delete('1.0', f'{lines-1000}.0')
+                    self.console_widget.config(state='disabled')
+        
+        # 創建並添加GUI日誌處理器
+        if hasattr(self, 'console_text') and self.console_text is not None:
+            self.gui_log_handler = GUILogHandler(self.console_text, self.root)
+            self.gui_log_handler.setLevel(logging.INFO)
+            self.gui_log_handler.setFormatter(logging.Formatter('%(levelname)s - %(message)s'))
+            self.logger.addHandler(self.gui_log_handler)
+            self.logger.info("GUI日誌處理器已啟用")
+    
+    def clear_console(self):
+        """清除控制台輸出"""
+        self.console_text.config(state='normal')
+        self.console_text.delete('1.0', tk.END)
+        self.console_text.config(state='disabled')
+        self.logger.info("控制台日誌已清除")
+    
+    def init_progress(self, total_files):
+        """初始化進度條"""
+        self.total_files = total_files
+        self.processed_files = 0
+        self.progress_bar['maximum'] = total_files
+        self.progress_bar['value'] = 0
+        self.update_progress_label()
+    
+    def update_progress(self, increment=1):
+        """更新進度"""
+        self.processed_files += increment
+        if hasattr(self, 'progress_bar'):
+            self.root.after(0, self._update_progress_gui)
+    
+    def _update_progress_gui(self):
+        """在主線程中更新進度GUI"""
+        self.progress_bar['value'] = self.processed_files
+        self.update_progress_label()
+        
+    def update_progress_label(self):
+        """更新進度標籤"""
+        if self.total_files > 0:
+            percentage = (self.processed_files / self.total_files) * 100
+            self.progress_label.config(text=f"{self.processed_files} / {self.total_files} ({percentage:.1f}%)")
+        else:
+            self.progress_label.config(text="0 / 0 (0%)")
+
     def add_source_file(self):
         filename = filedialog.askopenfilename(title="選擇發行檔案")
         if filename:
@@ -507,8 +723,8 @@ class WebsitePublisher:
             self.smtp_password_entry.configure(show="*")
     
     def save_smtp_config(self):
-        if not self.smtp_server_var.get() or not self.smtp_username_var.get() or not self.smtp_password_var.get():
-            messagebox.showwarning("警告", "請填寫完整的SMTP設定")
+        if not self.smtp_server_var.get():
+            messagebox.showwarning("警告", "請填寫SMTP伺服器地址")
             return
         
         try:
@@ -528,8 +744,8 @@ class WebsitePublisher:
         messagebox.showinfo("成功", "SMTP設定已儲存")
     
     def test_smtp_connection(self):
-        if not self.smtp_server_var.get() or not self.smtp_username_var.get() or not self.smtp_password_var.get():
-            messagebox.showwarning("警告", "請先填寫SMTP設定")
+        if not self.smtp_server_var.get():
+            messagebox.showwarning("警告", "請先填寫SMTP伺服器地址")
             return
         
         test_thread = threading.Thread(target=self._test_smtp_worker)
@@ -548,21 +764,118 @@ class WebsitePublisher:
                 'use_tls': self.use_tls_var.get()
             }
             
-            server = smtplib.SMTP(smtp_config['smtp_server'], smtp_config['smtp_port'])
+            # 檢查常見的設定問題
+            email_domain = smtp_config['username'].split('@')[-1] if '@' in smtp_config['username'] else ''
+            smtp_domain = smtp_config['smtp_server'].lower()
+            
+            self.logger.info(f"正在測試 SMTP 連接到 {smtp_config['smtp_server']}:{smtp_config['smtp_port']}")
+            self.logger.info(f"用戶: {smtp_config['username']}")
+            
+            # 設定超時時間
+            server = smtplib.SMTP(timeout=30)
+            server.connect(smtp_config['smtp_server'], smtp_config['smtp_port'])
+            
             if smtp_config['use_tls']:
-                server.starttls()
-            server.login(smtp_config['username'], smtp_config['password'])
+                self.logger.info("啟用 TLS 加密...")
+                # 檢查是否為 IP 地址
+                import re
+                is_ip = re.match(r'^\d+\.\d+\.\d+\.\d+$', smtp_config['smtp_server'])
+                if is_ip:
+                    self.logger.warning("檢測到使用 IP 地址進行 TLS 連接，將跳過證書驗證")
+                    # 對於 IP 地址，跳過主機名驗證
+                    import ssl
+                    context = ssl.create_default_context()
+                    context.check_hostname = False
+                    context.verify_mode = ssl.CERT_NONE
+                    server.starttls(context=context)
+                else:
+                    server.starttls()
+            
+            # 只有在提供用戶名時才進行身份驗證
+            if smtp_config['username'].strip():
+                self.logger.info("正在進行身份驗證...")
+                server.login(smtp_config['username'], smtp_config['password'])
+            else:
+                self.logger.info("無需身份驗證（開放式 SMTP 中繼）")
             server.quit()
             
             self.status_var.set("SMTP測試完成")
             self.root.after(0, lambda: messagebox.showinfo("SMTP測試", "SMTP連接測試成功！"))
             self.logger.info("SMTP連接測試成功")
             
+        except smtplib.SMTPConnectError as e:
+            error_msg = f"無法連接到SMTP伺服器: {str(e)}\n\n可能原因:\n1. 伺服器地址或端口錯誤\n2. 防火牆阻止連接\n3. 網絡問題"
+            self._handle_smtp_error(error_msg, "連接錯誤")
+            
+        except smtplib.SMTPAuthenticationError as e:
+            error_msg = f"SMTP身份驗證失敗: {str(e)}\n\n可能原因:\n1. 用戶名或密碼錯誤\n2. 需要使用應用程式密碼\n3. 帳戶被鎖定或禁用"
+            self._handle_smtp_error(error_msg, "驗證錯誤")
+            
         except Exception as e:
-            error_msg = f"SMTP連接失敗: {str(e)}"
-            self.status_var.set("SMTP測試失敗")
-            self.root.after(0, lambda: messagebox.showerror("SMTP測試失敗", error_msg))
-            self.logger.error(f"SMTP連接測試失敗: {str(e)}")
+            error_type = type(e).__name__
+            error_msg = str(e)
+            
+            # 針對常見錯誤提供具體建議
+            if "10060" in error_msg:
+                suggestions = self._get_smtp_suggestions(smtp_config)
+                error_msg = f"連接超時錯誤: {error_msg}\n\n{suggestions}"
+            elif "10061" in error_msg:
+                error_msg = f"連接被拒絕: {error_msg}\n\n可能原因:\n1. SMTP端口錯誤\n2. 伺服器不允許連接\n3. 防火牆阻止"
+            
+            self._handle_smtp_error(f"{error_type}: {error_msg}", "SMTP測試失敗")
+    
+    def _handle_smtp_error(self, error_msg, title):
+        """處理SMTP錯誤"""
+        self.status_var.set("SMTP測試失敗")
+        self.root.after(0, lambda: messagebox.showerror(title, error_msg))
+        self.logger.error(f"SMTP連接測試失敗: {error_msg}")
+    
+    def _get_smtp_suggestions(self, smtp_config):
+        """根據配置提供SMTP設定建議"""
+        email_domain = smtp_config['username'].split('@')[-1] if '@' in smtp_config['username'] else ''
+        smtp_server = smtp_config['smtp_server'].lower()
+        
+        suggestions = "建議的解決方案:\n"
+        
+        # 檢查是否為 IP 地址
+        import re
+        is_ip = re.match(r'^\d+\.\d+\.\d+\.\d+$', smtp_server)
+        
+        # 檢查郵箱和SMTP伺服器是否匹配
+        if email_domain == 'vscc.org.tw' and 'gmail' in smtp_server:
+            suggestions += "1. ⚠️ 郵箱域名不匹配！您使用的是 @vscc.org.tw 郵箱，但配置的是 Gmail SMTP\n"
+            suggestions += "   建議使用 VSCC 的 SMTP 伺服器:\n"
+            suggestions += "   - SMTP伺服器: mail.vscc.org.tw 或 smtp.vscc.org.tw\n"
+            suggestions += "   - 端口: 587 (TLS) 或 465 (SSL)\n\n"
+        elif email_domain == 'gmail.com' and 'gmail' in smtp_server:
+            suggestions += "1. Gmail 需要使用應用程式密碼，不能使用普通密碼\n"
+            suggestions += "2. 啟用兩步驟驗證後生成應用程式密碼\n\n"
+        elif is_ip and smtp_config['use_tls'] and smtp_config['smtp_port'] == 25:
+            suggestions += "1. ⚠️ 配置問題！您使用 IP 地址 + 端口 25 + TLS，這通常不相容\n"
+            suggestions += "   VSCC 內部 SMTP 伺服器建議配置:\n"
+            suggestions += "   - SMTP伺服器: 192.168.80.60\n"
+            suggestions += "   - 端口: 25\n"
+            suggestions += "   - 用戶名: 空白\n"
+            suggestions += "   - 密碼: 空白\n"
+            suggestions += "   - TLS: 關閉\n\n"
+        elif is_ip and smtp_config['use_tls']:
+            suggestions += "1. ℹ️ 使用 IP 地址進行 TLS 連接已自動跳過證書驗證\n"
+            suggestions += "   如果仍然失敗，建議:\n"
+            suggestions += "   - 關閉 TLS（如果是內部伺服器）\n"
+            suggestions += "   - 或使用伺服器的域名而非 IP\n\n"
+        
+        suggestions += "2. 檢查網絡連接:\n"
+        suggestions += "   - 確認防火牆沒有阻止端口 " + str(smtp_config['smtp_port']) + "\n"
+        suggestions += "   - 嘗試使用公司內部網絡\n\n"
+        
+        suggestions += "3. 常見 SMTP 設定:\n"
+        suggestions += "   - Gmail: smtp.gmail.com:587 (TLS) 或 :465 (SSL)\n"
+        suggestions += "   - Outlook: smtp-mail.outlook.com:587 (TLS)\n"
+        suggestions += "   - VSCC: 請聯繫IT部門確認SMTP設定\n\n"
+        
+        suggestions += "4. 如果是公司郵箱，請聯繫IT部門獲取正確的SMTP設定"
+        
+        return suggestions
     
     def add_notification_email(self):
         email = self.email_entry.get().strip()
@@ -681,89 +994,82 @@ class WebsitePublisher:
         test_thread.start()
         
     def _test_connection_worker(self, server):
-        """在背景線程中測試連接"""
+        """在背景線程中測試網路共享連接"""
         self.status_var.set(f"正在測試連接到 {server['ip']}...")
-        self.logger.info(f"開始測試連接: {server['ip']}")
+        self.logger.info(f"開始測試網路共享連接: {server['ip']}")
         
         try:
-            ssh = paramiko.SSHClient()
-            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            # 解析遠端路徑
+            remote_path = server['path']
+            remote_ip = server['ip']
+            remote_user = server['username']
+            remote_pass = server['password']
             
-            # 設定連接超時
-            ssh.connect(
-                hostname=server['ip'],
-                username=server['username'],
-                password=server['password'],
-                timeout=10
-            )
-            
-            # 測試基本命令
-            stdin, stdout, stderr = ssh.exec_command('echo "Connection test successful"')
-            result = stdout.read().decode().strip()
-            
-            # 測試目標路徑是否存在
-            if '\\' in server['path']:
-                # Windows路徑 - 使用適當的編碼處理中文
-                stdin, stdout, stderr = ssh.exec_command(f'dir "{server["path"]}" 2>nul || echo "PATH_NOT_EXISTS"')
-            else:
-                # Linux路徑
-                stdin, stdout, stderr = ssh.exec_command(f'ls -la "{server["path"]}" 2>/dev/null || echo "PATH_NOT_EXISTS"')
-            
-            # 讀取輸出並處理編碼問題
-            stdout_bytes = stdout.read()
             try:
-                path_result = stdout_bytes.decode('utf-8').strip()
-            except UnicodeDecodeError:
-                # 如果UTF-8解碼失敗，嘗試其他編碼
-                try:
-                    path_result = stdout_bytes.decode('cp950').strip()  # 繁體中文Windows
-                except UnicodeDecodeError:
-                    try:
-                        path_result = stdout_bytes.decode('gbk').strip()  # 簡體中文Windows
-                    except UnicodeDecodeError:
-                        path_result = stdout_bytes.decode('latin-1').strip()  # 最後備選
-            
-            if "PATH_NOT_EXISTS" in path_result:
-                message = f"連接成功！\n但目標路徑不存在: {server['path']}\n建議檢查路徑設定"
-                self.logger.warning(f"連接成功但路徑不存在: {server['ip']} - {server['path']}")
-                ssh.close()
-                self.root.after(0, lambda: messagebox.showwarning("連接測試", message))
-            else:
+                drive_letter = remote_path.split(':')[0]
+                dir_path = remote_path.split(':')[1].lstrip('\\')
+                
+                # 完整的 UNC 目標路徑
+                full_unc_path = f"\\\\{remote_ip}\\{drive_letter}$\\{dir_path}"
+                share_to_map = f"\\\\{remote_ip}\\{drive_letter}$"
+                
+            except IndexError:
+                error_msg = f"遠端路徑格式不正確: {remote_path}\n應為 'D:\\資料夾' 格式"
+                self.logger.error(f"路徑格式錯誤: {remote_path}")
+                self.root.after(0, lambda: messagebox.showerror("路徑錯誤", error_msg))
+                self.status_var.set("路徑格式錯誤")
+                return
+
+            # 網路連接命令
+            connection_command = [
+                "net", "use", share_to_map, remote_pass, f"/user:{remote_user}", "/persistent:no"
+            ]
+            disconnection_command = [
+                "net", "use", share_to_map, "/delete"
+            ]
+
+            # 1. 建立網路連接
+            self.logger.info(f"正在連線至 {share_to_map}...")
+            result = subprocess.run(connection_command, check=True, capture_output=True, text=True)
+            self.logger.info("網路共享連線成功")
+
+            # 2. 測試目標路徑是否存在
+            if os.path.exists(full_unc_path):
                 # 基本連接和路徑測試成功，進行資料夾結構檢查
-                folder_check_result = self._check_target_folders(ssh, server)
-                ssh.close()
+                folder_check_result = self._check_target_folders_network(full_unc_path)
                 
                 if folder_check_result['success']:
-                    message = f"連接測試成功！\n伺服器: {server['ip']}\n目標路徑: {server['path']}\n資料夾結構: 正確\n狀態: 正常"
-                    self.logger.info(f"連接測試成功: {server['ip']}")
+                    message = f"連接測試成功！\n伺服器: {server['ip']}\n目標路徑: {server['path']}\n網路路徑: {full_unc_path}\n資料夾結構: 正確\n狀態: 正常"
+                    self.logger.info(f"網路共享連接測試成功: {server['ip']}")
                     self.root.after(0, lambda: messagebox.showinfo("連接測試", message))
                 else:
                     message = f"連接成功但資料夾結構不完整！\n伺服器: {server['ip']}\n目標路徑: {server['path']}\n\n缺少的資料夾:\n{folder_check_result['missing_folders']}\n\n建議先執行一次發布以建立正確的資料夾結構"
                     self.logger.warning(f"連接成功但資料夾結構不完整: {server['ip']} - 缺少: {folder_check_result['missing_folders']}")
                     self.root.after(0, lambda: messagebox.showwarning("資料夾結構檢查", message))
+            else:
+                message = f"連接成功！\n但目標路徑不存在: {full_unc_path}\n建議檢查路徑設定或手動建立資料夾"
+                self.logger.warning(f"連接成功但路徑不存在: {server['ip']} - {full_unc_path}")
+                self.root.after(0, lambda: messagebox.showwarning("連接測試", message))
                 
+            # 3. 中斷連接
+            subprocess.run(disconnection_command, capture_output=True)
             self.status_var.set("連接測試完成")
             
-        except paramiko.AuthenticationException:
-            error_msg = f"認證失敗: 使用者名稱或密碼錯誤\n伺服器: {server['ip']}"
-            self.logger.error(f"認證失敗: {server['ip']}")
+        except subprocess.CalledProcessError as e:
+            error_message = e.stderr if e.stderr else str(e)
+            error_msg = f"網路共享連接失敗\n伺服器: {server['ip']}\n\n可能原因:\n1. 帳號密碼錯誤\n2. 網路不通\n3. 遠端主機未啟用系統管理分享(C$, D$)\n4. 防火牆阻擋\n\n詳細錯誤: {error_message}"
+            self.logger.error(f"網路共享連接失敗: {server['ip']} - {error_message}")
             self.root.after(0, lambda: messagebox.showerror("連接測試失敗", error_msg))
-            self.status_var.set("連接測試失敗: 認證錯誤")
-            
-        except paramiko.SSHException as e:
-            error_msg = f"SSH連接錯誤: {str(e)}\n伺服器: {server['ip']}"
-            self.logger.error(f"SSH連接錯誤: {server['ip']} - {str(e)}")
-            self.root.after(0, lambda: messagebox.showerror("連接測試失敗", error_msg))
-            self.status_var.set("連接測試失敗: SSH錯誤")
+            self.status_var.set("連接測試失敗")
             
         except Exception as e:
-            error_msg = f"連接失敗: {str(e)}\n伺服器: {server['ip']}\n\n可能原因:\n1. IP地址錯誤\n2. 網路不通\n3. SSH服務未啟動\n4. 防火牆阻擋"
+            error_msg = f"連接失敗: {str(e)}\n伺服器: {server['ip']}\n\n可能原因:\n1. IP地址錯誤\n2. 網路不通\n3. 遠端主機未開機\n4. 防火牆阻擋"
             self.logger.error(f"連接測試失敗: {server['ip']} - {str(e)}")
             self.root.after(0, lambda: messagebox.showerror("連接測試失敗", error_msg))
             self.status_var.set("連接測試失敗")
     
-    def _check_target_folders(self, ssh, server):
-        """檢查目標伺服器上是否包含所有源檔案對應的資料夾"""
+    def _check_target_folders_network(self, full_unc_path):
+        """檢查目標網路路徑上是否包含所有源檔案對應的資料夾"""
         result = {
             'success': True,
             'missing_folders': []
@@ -787,33 +1093,12 @@ class WebsitePublisher:
                 return result
             
             # 檢查目標路徑下的資料夾
-            target_path = server['path']
-            if '\\' in target_path:
-                # Windows路徑
-                command = f'dir "{target_path}" /b /ad 2>nul'
-            else:
-                # Linux路徑
-                command = f'ls -d "{target_path}"/*/ 2>/dev/null | xargs -n 1 basename'
-            
-            stdin, stdout, stderr = ssh.exec_command(command)
-            stdout_bytes = stdout.read()
-            
-            # 處理編碼問題
-            try:
-                folder_list_str = stdout_bytes.decode('utf-8').strip()
-            except UnicodeDecodeError:
-                try:
-                    folder_list_str = stdout_bytes.decode('cp950').strip()
-                except UnicodeDecodeError:
-                    try:
-                        folder_list_str = stdout_bytes.decode('gbk').strip()
-                    except UnicodeDecodeError:
-                        folder_list_str = stdout_bytes.decode('latin-1').strip()
-            
-            # 解析現有資料夾列表
             existing_folders = []
-            if folder_list_str:
-                existing_folders = [folder.strip() for folder in folder_list_str.split('\n') if folder.strip()]
+            if os.path.exists(full_unc_path):
+                for item in os.listdir(full_unc_path):
+                    item_path = os.path.join(full_unc_path, item)
+                    if os.path.isdir(item_path):
+                        existing_folders.append(item)
             
             # 檢查缺少的資料夾
             for expected_folder in expected_folders:
@@ -826,7 +1111,7 @@ class WebsitePublisher:
                 result['missing_folders'] = '\n'.join([f"• {folder}" for folder in result['missing_folders']])
             
         except Exception as e:
-            self.logger.error(f"資料夾結構檢查失敗: {server['ip']} - {str(e)}")
+            self.logger.error(f"資料夾結構檢查失敗: {full_unc_path} - {str(e)}")
             result['success'] = False
             result['missing_folders'] = f"檢查過程發生錯誤: {str(e)}"
         
@@ -949,12 +1234,48 @@ class WebsitePublisher:
         publish_thread.daemon = True
         publish_thread.start()
         
+    def _count_total_files(self):
+        """計算總檔案數量"""
+        total_files = 0
+        
+        for source in self.config['source_files']:
+            if os.path.isfile(source):
+                total_files += 1
+            elif os.path.isdir(source):
+                for root, dirs, files in os.walk(source):
+                    for file in files:
+                        # 跳過需要刪除的檔案
+                        if file not in self.config['delete_files']:
+                            total_files += 1
+        
+        # 乘以伺服器數量（每個伺服器都要複製一遍）
+        return total_files * len(self.config['servers'])
+
     def _publish_worker(self):
         start_time = datetime.now()
+        
+        # 初始化發布報告
+        self.publish_report = {
+            'servers': {},
+            'start_time': start_time,
+            'end_time': None,
+            'total_stats': {
+                'new_files': 0,
+                'updated_files': 0,
+                'skipped_files': 0,
+                'deleted_files': 0
+            }
+        }
+        
         self.logger.info("=== 開始發布作業 ===")
         self.logger.info(f"發布時間: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
         self.logger.info(f"源文件數量: {len(self.config['source_files'])}")
         self.logger.info(f"目標伺服器數量: {len(self.config['servers'])}")
+        
+        # 計算總檔案數並初始化進度條
+        total_files = self._count_total_files()
+        self.logger.info(f"預計處理檔案總數: {total_files}")
+        self.root.after(0, lambda: self.init_progress(total_files))
         
         try:
             success_count = 0
@@ -973,15 +1294,16 @@ class WebsitePublisher:
             end_time = datetime.now()
             total_duration = (end_time - start_time).total_seconds()
             
+            # 更新報告結束時間
+            self.publish_report['end_time'] = end_time
+            
             self.status_var.set("發布完成")
             self.logger.info(f"=== 發布作業完成 ===")
             self.logger.info(f"成功發布到 {success_count}/{len(self.config['servers'])} 個伺服器")
             self.logger.info(f"總耗時: {total_duration:.2f} 秒")
             
-            # 發送成功通知郵件
-            self._send_deployment_notification(True, start_time, end_time)
-            
-            self.root.after(0, self._show_success_message)
+            # 在主線程中處理發布完成的所有操作
+            self.root.after(0, lambda: self._handle_publish_success(start_time, end_time))
             
         except Exception as e:
             error_msg = str(e)
@@ -994,11 +1316,544 @@ class WebsitePublisher:
             self.logger.error(f"失敗時間: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
             self.logger.error(f"已執行時間: {total_duration:.2f} 秒")
             
-            # 發送失敗通知郵件
-            self._send_deployment_notification(False, start_time, end_time, error_msg)
+            # 在主線程中處理發布失敗的所有操作
+            self.root.after(0, lambda: self._handle_publish_failure(start_time, end_time, error_msg))
             
-            self.root.after(0, lambda msg=error_msg: self._show_error_message(msg))
+    def _handle_publish_success(self, start_time, end_time):
+        """在主線程中處理發布成功的所有操作"""
+        try:
+            # 完成進度條
+            self.init_progress(0)
             
+            # 保存到發布歷史（不觸發GUI刷新）
+            self.save_history_record(self.publish_report, is_success=True)
+            
+            # 刷新歷史記錄顯示
+            if hasattr(self, 'history_tree'):
+                self.refresh_history()
+            
+            # 發送成功通知郵件（在背景線程中執行）
+            email_thread = threading.Thread(
+                target=self._send_deployment_notification, 
+                args=(True, start_time, end_time)
+            )
+            email_thread.daemon = True
+            email_thread.start()
+            
+            # 顯示發布報告
+            self._show_publish_report()
+            
+            # 顯示成功訊息
+            self._show_success_message()
+            
+        except Exception as e:
+            self.logger.error(f"處理發布成功時發生錯誤: {str(e)}")
+    
+    def _handle_publish_failure(self, start_time, end_time, error_msg):
+        """在主線程中處理發布失敗的所有操作"""
+        try:
+            # 重置進度條
+            self.init_progress(0)
+            
+            # 保存失敗記錄到歷史（不觸發GUI刷新）
+            self.save_history_record(self.publish_report, is_success=False)
+            
+            # 刷新歷史記錄顯示
+            if hasattr(self, 'history_tree'):
+                self.refresh_history()
+            
+            # 發送失敗通知郵件（在背景線程中執行）
+            email_thread = threading.Thread(
+                target=self._send_deployment_notification, 
+                args=(False, start_time, end_time, error_msg)
+            )
+            email_thread.daemon = True
+            email_thread.start()
+            
+            # 顯示錯誤訊息
+            self._show_error_message(error_msg)
+            
+        except Exception as e:
+            self.logger.error(f"處理發布失敗時發生錯誤: {str(e)}")
+
+    def _show_publish_report(self):
+        """顯示發布報告對話框"""
+        try:
+            # 檢查發布報告是否存在
+            if not hasattr(self, 'publish_report') or not self.publish_report:
+                self.logger.warning("無法顯示發布報告：報告數據不存在")
+                return
+            
+            report_dialog = tk.Toplevel(self.root)
+            report_dialog.title("發布完成報告")
+            report_dialog.geometry("1300x700")
+            report_dialog.resizable(True, True)
+            
+            # 延遲設置 grab_set，避免干擾其他對話框
+            self.root.after(100, lambda: report_dialog.grab_set() if report_dialog.winfo_exists() else None)
+            
+            # 居中顯示
+            try:
+                x = self.root.winfo_rootx() + 50
+                y = self.root.winfo_rooty() + 50
+                report_dialog.geometry("+%d+%d" % (x, y))
+            except tk.TclError:
+                # 如果無法獲取父窗口位置，使用默認位置
+                pass
+            
+            main_frame = ttk.Frame(report_dialog, padding="15")
+            main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+            
+            # 標題
+            title_label = ttk.Label(main_frame, text="🎉 發布完成報告", font=('Arial', 16, 'bold'))
+            title_label.grid(row=0, column=0, columnspan=2, pady=(0, 15))
+            
+            # 總體資訊
+            info_frame = ttk.LabelFrame(main_frame, text="總體資訊", padding="10")
+            info_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+            
+            # 計算總體統計
+            total_stats = self.publish_report['total_stats']
+            start_time = self.publish_report['start_time']
+            end_time = self.publish_report['end_time']
+            duration = (end_time - start_time).total_seconds() if end_time else 0
+            
+            info_text = f"""⏰ 發布時間: {start_time.strftime('%Y-%m-%d %H:%M:%S')}
+⏱️ 總耗時: {duration:.1f} 秒
+🖥️ 伺服器數量: {len(self.publish_report['servers'])}
+📁 新增檔案: {total_stats['new_files']}
+🔄 更新檔案: {total_stats['updated_files']}
+⏭️ 跳過檔案: {total_stats['skipped_files']}
+🗑️ 刪除檔案: {total_stats['deleted_files']}
+📊 總檔案操作: {sum(total_stats.values())}"""
+            
+            info_label = ttk.Label(info_frame, text=info_text, font=('Consolas', 10))
+            info_label.grid(row=0, column=0, sticky=(tk.W, tk.N))
+            
+            # 詳細資訊
+            detail_frame = ttk.LabelFrame(main_frame, text="詳細資訊", padding="10")
+            detail_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(10, 0))
+            
+            # 創建Notebook來顯示各伺服器的詳細信息
+            notebook = ttk.Notebook(detail_frame)
+            notebook.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+            
+            # 為每個伺服器創建一個頁面
+            for server_key, server_data in self.publish_report['servers'].items():
+                server_frame = ttk.Frame(notebook)
+                notebook.add(server_frame, text=f"伺服器: {server_key}")
+                
+                # 創建伺服器統計資訊
+                server_stats = server_data['stats']
+                stats_text = f"📁 新增: {server_stats['new_files']} | 🔄 更新: {server_stats['updated_files']} | ⏭️ 跳過: {server_stats['skipped_files']} | 🗑️ 刪除: {server_stats['deleted_files']}"
+                stats_label = ttk.Label(server_frame, text=stats_text, font=('Arial', 9))
+                stats_label.grid(row=0, column=0, sticky=(tk.W), pady=(0, 10))
+                
+                # 創建樹狀視圖顯示檔案操作詳情
+                tree_frame = ttk.Frame(server_frame)
+                tree_frame.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+                
+                columns = ('operation', 'path', 'detail', 'time')
+                tree = ttk.Treeview(tree_frame, columns=columns, show='tree headings', height=15)
+                
+                # 設定列標題並綁定排序功能
+                tree.heading('#0', text='檔案名稱 ↕️', command=lambda: self._sort_tree(tree, '#0'))
+                tree.heading('operation', text='操作 ↕️', command=lambda: self._sort_tree(tree, 'operation'))
+                tree.heading('path', text='路徑 ↕️', command=lambda: self._sort_tree(tree, 'path'))
+                tree.heading('detail', text='詳細資訊 ↕️', command=lambda: self._sort_tree(tree, 'detail'))
+                tree.heading('time', text='時間 ↕️', command=lambda: self._sort_tree(tree, 'time'))
+                
+                # 設定列寬
+                tree.column('#0', width=200, minwidth=150)
+                tree.column('operation', width=80, minwidth=60)
+                tree.column('path', width=300, minwidth=200)
+                tree.column('detail', width=250, minwidth=150)
+                tree.column('time', width=150, minwidth=120)
+                
+                # 初始化排序狀態
+                tree.sort_states = {col: 'none' for col in ['#0'] + list(columns)}
+                
+                tree.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+                
+                # 添加垂直滾動條
+                v_scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=tree.yview)
+                v_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
+                tree.configure(yscrollcommand=v_scrollbar.set)
+                
+                # 添加水平滾動條
+                h_scrollbar = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL, command=tree.xview)
+                h_scrollbar.grid(row=1, column=0, sticky=(tk.W, tk.E))
+                tree.configure(xscrollcommand=h_scrollbar.set)
+                
+                # 填充樹狀視圖數據
+                for project_name, project_data in server_data['projects'].items():
+                    # 創建專案節點
+                    project_stats = project_data['stats']
+                    project_text = f"[專案] {project_name} (新增:{project_stats['new_files']}, 更新:{project_stats['updated_files']}, 跳過:{project_stats['skipped_files']}, 刪除:{project_stats['deleted_files']})"
+                    project_node = tree.insert('', 'end', text=project_text, values=('', '', '', ''))
+                    
+                    # 添加有實際操作的檔案記錄 (排除跳過的檔案)
+                    actual_operations = [f for f in project_data['files'] if f['operation'] != 'skipped']
+                    for file_info in actual_operations:
+                        operation_icons = {
+                            'new': '📄 新增',
+                            'updated': '🔄 更新', 
+                            'deleted': '🗑️ 刪除'
+                        }
+                        
+                        operation_text = operation_icons.get(file_info['operation'], file_info['operation'])
+                        # 從 path 中提取檔案名稱
+                        filename = os.path.basename(file_info['path']) if file_info['path'] else ''
+                        tree.insert(project_node, 'end', 
+                                  text=filename,
+                                  values=(operation_text, file_info['path'], 
+                                         file_info['detail'], file_info['timestamp']))
+                
+                # 設定權重
+                server_frame.columnconfigure(0, weight=1)
+                server_frame.rowconfigure(1, weight=1)
+                tree_frame.columnconfigure(0, weight=1)
+                tree_frame.rowconfigure(0, weight=1)
+            
+            # 按鈕區域
+            button_frame = ttk.Frame(main_frame)
+            button_frame.grid(row=4, column=0, columnspan=2, pady=(10, 0))
+            
+            ttk.Button(button_frame, text="關閉", command=report_dialog.destroy).grid(row=0, column=0)
+            
+            # 設定權重
+            report_dialog.columnconfigure(0, weight=1)
+            report_dialog.rowconfigure(0, weight=1)
+            main_frame.columnconfigure(0, weight=1)
+            main_frame.rowconfigure(3, weight=1)
+            detail_frame.columnconfigure(0, weight=1)
+            detail_frame.rowconfigure(0, weight=1)
+            
+        except Exception as e:
+            self.logger.error(f"顯示發布報告時發生錯誤: {str(e)}")
+            messagebox.showerror("錯誤", f"無法顯示發布報告: {str(e)}")
+    
+    def _sort_tree(self, tree, column):
+        """對樹狀視圖進行排序"""
+        try:
+            # 獲取當前排序狀態
+            current_sort = tree.sort_states.get(column, 'none')
+            
+            # 切換排序方向
+            if current_sort == 'none' or current_sort == 'desc':
+                new_sort = 'asc'
+                sort_icon = '↑'
+            else:
+                new_sort = 'desc'
+                sort_icon = '↓'
+            
+            # 更新排序狀態
+            tree.sort_states[column] = new_sort
+            
+            # 更新標題顯示
+            column_titles = {
+                '#0': '專案/檔案',
+                'operation': '操作',
+                'path': '路徑',
+                'detail': '詳細資訊',
+                'time': '時間'
+            }
+            
+            # 重置所有標題
+            for col, title in column_titles.items():
+                if col == column:
+                    tree.heading(col, text=f"{title} {sort_icon}")
+                else:
+                    tree.heading(col, text=f"{title} ↕️")
+            
+            # 對每個專案的檔案進行排序
+            for project_item in tree.get_children():
+                file_items = tree.get_children(project_item)
+                if not file_items:
+                    continue
+                
+                # 收集檔案數據
+                file_data = []
+                for file_item in file_items:
+                    item_text = tree.item(file_item, 'text')
+                    item_values = tree.item(file_item, 'values')
+                    file_data.append({
+                        'item_id': file_item,
+                        'text': item_text,
+                        'values': item_values
+                    })
+                
+                # 排序檔案數據
+                if column == '#0':
+                    # 按專案/檔案名稱排序
+                    file_data.sort(key=lambda x: x['text'].lower(), reverse=(new_sort == 'desc'))
+                elif column == 'operation':
+                    # 按操作類型排序
+                    operation_order = {'📄 新增': 1, '🔄 更新': 2, '🗑️ 刪除': 3, '': 4}
+                    file_data.sort(key=lambda x: operation_order.get(x['values'][0], 4), reverse=(new_sort == 'desc'))
+                elif column == 'path':
+                    # 按檔案路徑排序
+                    file_data.sort(key=lambda x: x['values'][1].lower(), reverse=(new_sort == 'desc'))
+                elif column == 'detail':
+                    # 按詳細資訊排序
+                    file_data.sort(key=lambda x: x['values'][2].lower(), reverse=(new_sort == 'desc'))
+                elif column == 'time':
+                    # 按時間排序
+                    file_data.sort(key=lambda x: x['values'][3], reverse=(new_sort == 'desc'))
+                
+                # 重新排列項目
+                for index, item_data in enumerate(file_data):
+                    tree.move(item_data['item_id'], project_item, index)
+            
+        except Exception as e:
+            # 排序出錯時不影響主要功能
+            print(f"排序錯誤: {e}")
+    
+    def save_history_record(self, report, is_success=True):
+        """保存發布記錄到歷史"""
+        try:
+            # 創建歷史記錄目錄
+            if not os.path.exists('history'):
+                os.makedirs('history')
+            
+            # 生成歷史記錄項目
+            history_item = {
+                'id': report['start_time'].strftime('%Y%m%d_%H%M%S'),
+                'start_time': report['start_time'].isoformat(),
+                'end_time': report['end_time'].isoformat() if report['end_time'] else None,
+                'duration': (report['end_time'] - report['start_time']).total_seconds() if report['end_time'] else 0,
+                'server_count': len(report['servers']),
+                'total_stats': report['total_stats'].copy(),
+                'servers': report['servers'].copy(),
+                'status': '成功' if is_success else '失敗'
+            }
+            
+            # 載入現有歷史記錄
+            history_file = 'history/publish_history.json'
+            history_records = []
+            if os.path.exists(history_file):
+                try:
+                    with open(history_file, 'r', encoding='utf-8') as f:
+                        history_records = json.load(f)
+                except:
+                    history_records = []
+            
+            # 添加新記錄到列表開頭（最新的在最上面）
+            history_records.insert(0, history_item)
+            
+            # 保留最近100筆記錄
+            if len(history_records) > 100:
+                history_records = history_records[:100]
+            
+            # 保存歷史記錄
+            with open(history_file, 'w', encoding='utf-8') as f:
+                json.dump(history_records, f, ensure_ascii=False, indent=2)
+            
+            self.logger.info(f"發布記錄已保存到歷史 ID: {history_item['id']}")
+            
+        except Exception as e:
+            self.logger.error(f"保存歷史記錄失敗: {str(e)}")
+    
+    def load_history_records(self):
+        """載入歷史記錄"""
+        try:
+            history_file = 'history/publish_history.json'
+            if not os.path.exists(history_file):
+                return []
+            
+            with open(history_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            self.logger.error(f"載入歷史記錄失敗: {str(e)}")
+            return []
+    
+    def refresh_history(self):
+        """刷新歷史記錄顯示"""
+        try:
+            # 清空現有項目
+            for item in self.history_tree.get_children():
+                self.history_tree.delete(item)
+            
+            # 載入歷史記錄
+            history_records = self.load_history_records()
+            
+            # 填充到TreeView
+            for record in history_records:
+                start_time = datetime.fromisoformat(record['start_time']).strftime('%Y-%m-%d %H:%M:%S')
+                duration = f"{record['duration']:.1f}"
+                server_count = str(record['server_count'])
+                
+                # 計算總檔案操作數
+                total_ops = (record['total_stats']['new_files'] + 
+                           record['total_stats']['updated_files'] + 
+                           record['total_stats']['skipped_files'] + 
+                           record['total_stats']['deleted_files'])
+                
+                status = record['status']
+                
+                self.history_tree.insert('', 'end', iid=record['id'], values=(
+                    start_time, duration, server_count, str(total_ops), status
+                ))
+            
+            self.logger.info(f"已載入 {len(history_records)} 筆歷史記錄")
+            
+        except Exception as e:
+            self.logger.error(f"刷新歷史記錄失敗: {str(e)}")
+    
+    def view_history_detail(self, event):
+        """查看歷史記錄詳情"""
+        try:
+            # 獲取選中的項目
+            selection = self.history_tree.selection()
+            if not selection:
+                return
+            
+            record_id = selection[0]
+            
+            # 載入歷史記錄
+            history_records = self.load_history_records()
+            target_record = None
+            
+            for record in history_records:
+                if record['id'] == record_id:
+                    target_record = record
+                    break
+            
+            if not target_record:
+                return
+            
+            # 生成詳細報告文字
+            detail_text = self._generate_history_detail_text(target_record)
+            
+            # 顯示在詳細信息區域
+            self.history_detail_text.config(state='normal')
+            self.history_detail_text.delete('1.0', tk.END)
+            self.history_detail_text.insert(tk.END, detail_text)
+            self.history_detail_text.config(state='disabled')
+            
+        except Exception as e:
+            self.logger.error(f"查看歷史詳情失敗: {str(e)}")
+    
+    def _generate_history_detail_text(self, record):
+        """生成歷史記錄詳細文字"""
+        lines = []
+        
+        # 基本資訊
+        start_time = datetime.fromisoformat(record['start_time']).strftime('%Y-%m-%d %H:%M:%S')
+        end_time = datetime.fromisoformat(record['end_time']).strftime('%Y-%m-%d %H:%M:%S') if record['end_time'] else '未知'
+        
+        lines.append(f"📋 發布資訊")
+        lines.append(f"   記錄ID: {record['id']}")
+        lines.append(f"   開始時間: {start_time}")
+        lines.append(f"   結束時間: {end_time}")
+        lines.append(f"   總耗時: {record['duration']:.2f} 秒")
+        lines.append(f"   狀態: {record['status']}")
+        lines.append("")
+        
+        # 總體統計
+        stats = record['total_stats']
+        lines.append(f"📊 總體統計")
+        lines.append(f"   新增檔案: {stats['new_files']} 個")
+        lines.append(f"   覆蓋檔案: {stats['updated_files']} 個")
+        lines.append(f"   跳過檔案: {stats['skipped_files']} 個")
+        lines.append(f"   刪除檔案: {stats['deleted_files']} 個")
+        lines.append("")
+        
+        # 各伺服器詳情
+        lines.append(f"🖥️ 伺服器詳情")
+        for server_key, server_data in record['servers'].items():
+            lines.append(f"   ── {server_key} ──")
+            server_stats = server_data['stats']
+            lines.append(f"   統計: 新增 {server_stats['new_files']}, 覆蓋 {server_stats['updated_files']}, 跳過 {server_stats['skipped_files']}, 刪除 {server_stats['deleted_files']}")
+            
+            for project_name, project_data in server_data['projects'].items():
+                lines.append(f"   📁 {project_name}")
+                project_stats = project_data['stats']
+                lines.append(f"      統計: 新增 {project_stats['new_files']}, 覆蓋 {project_stats['updated_files']}, 跳過 {project_stats['skipped_files']}, 刪除 {project_stats['deleted_files']}")
+                
+                # 過濾並顯示有實際操作的檔案 (排除跳過的檔案)
+                actual_operations = [f for f in project_data['files'] if f['operation'] != 'skipped']
+                if actual_operations:
+                    lines.append(f"      檔案操作 (顯示前10個實際操作):")
+                    for i, file_info in enumerate(actual_operations[:10]):
+                        operation_name = {
+                            'new': '新增',
+                            'updated': '覆蓋',
+                            'deleted': '刪除'
+                        }.get(file_info['operation'], '未知')
+                        lines.append(f"        [{file_info['timestamp']}] {operation_name}: {file_info['path']}")
+                    
+                    if len(actual_operations) > 10:
+                        lines.append(f"        ... 還有 {len(actual_operations) - 10} 個實際操作")
+                lines.append("")
+        
+        return '\n'.join(lines)
+    
+    def delete_selected_history(self):
+        """刪除選中的歷史記錄"""
+        try:
+            selection = self.history_tree.selection()
+            if not selection:
+                messagebox.showwarning("提示", "請先選擇要刪除的記錄")
+                return
+            
+            # 確認刪除
+            if not messagebox.askyesno("確認刪除", "確定要刪除選中的發布記錄嗎？"):
+                return
+            
+            # 載入歷史記錄
+            history_records = self.load_history_records()
+            
+            # 刪除選中的記錄
+            for record_id in selection:
+                history_records = [r for r in history_records if r['id'] != record_id]
+            
+            # 保存更新後的歷史記錄
+            history_file = 'history/publish_history.json'
+            with open(history_file, 'w', encoding='utf-8') as f:
+                json.dump(history_records, f, ensure_ascii=False, indent=2)
+            
+            # 刷新顯示
+            self.refresh_history()
+            
+            # 清空詳細信息區域
+            self.history_detail_text.config(state='normal')
+            self.history_detail_text.delete('1.0', tk.END)
+            self.history_detail_text.config(state='disabled')
+            
+            messagebox.showinfo("成功", f"已刪除 {len(selection)} 筆記錄")
+            
+        except Exception as e:
+            self.logger.error(f"刪除歷史記錄失敗: {str(e)}")
+            messagebox.showerror("錯誤", f"刪除記錄失敗: {str(e)}")
+    
+    def clear_all_history(self):
+        """清除所有歷史記錄"""
+        try:
+            # 確認清除
+            if not messagebox.askyesno("確認清除", "確定要清除所有發布歷史記錄嗎？\n此操作無法復原！"):
+                return
+            
+            # 清除歷史記錄檔案
+            history_file = 'history/publish_history.json'
+            if os.path.exists(history_file):
+                os.remove(history_file)
+            
+            # 刷新顯示
+            self.refresh_history()
+            
+            # 清空詳細信息區域
+            self.history_detail_text.config(state='normal')
+            self.history_detail_text.delete('1.0', tk.END)
+            self.history_detail_text.config(state='disabled')
+            
+            messagebox.showinfo("成功", "所有歷史記錄已清除")
+            
+        except Exception as e:
+            self.logger.error(f"清除歷史記錄失敗: {str(e)}")
+            messagebox.showerror("錯誤", f"清除記錄失敗: {str(e)}")
+
+
     def _show_success_message(self):
         messagebox.showinfo("成功", "所有伺服器發布完成")
         
@@ -1015,7 +1870,9 @@ class WebsitePublisher:
             
             # 創建郵件
             msg = MIMEMultipart()
-            msg['From'] = smtp_config['username']
+            # 如果沒有配置用戶名，使用預設的 VSCC 發件人地址
+            from_email = smtp_config['username'] if smtp_config['username'].strip() else 'noreply@vscc.org.tw'
+            msg['From'] = from_email
             msg['To'] = ', '.join(recipients)
             msg['Subject'] = Header(subject, 'utf-8')
             
@@ -1025,8 +1882,22 @@ class WebsitePublisher:
             # 發送郵件
             server = smtplib.SMTP(smtp_config['smtp_server'], smtp_config['smtp_port'])
             if smtp_config['use_tls']:
-                server.starttls()
-            server.login(smtp_config['username'], smtp_config['password'])
+                # 檢查是否為 IP 地址
+                import re
+                is_ip = re.match(r'^\d+\.\d+\.\d+\.\d+$', smtp_config['smtp_server'])
+                if is_ip:
+                    # 對於 IP 地址，跳過主機名驗證
+                    import ssl
+                    context = ssl.create_default_context()
+                    context.check_hostname = False
+                    context.verify_mode = ssl.CERT_NONE
+                    server.starttls(context=context)
+                else:
+                    server.starttls()
+            
+            # 只有在提供用戶名時才進行身份驗證
+            if smtp_config['username'].strip():
+                server.login(smtp_config['username'], smtp_config['password'])
             server.send_message(msg)
             server.quit()
             
@@ -1136,195 +2007,264 @@ class WebsitePublisher:
             self.logger.error(f"發送異常通知郵件失敗: {str(e)}")
             
     def _publish_to_server(self, server):
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        
+        """使用Windows網路共享方式合併式發布到伺服器"""
         try:
-            ssh.connect(
-                hostname=server['ip'],
-                username=server['username'],
-                password=server['password']
-            )
+            # 初始化伺服器報告
+            server_key = f"{server['ip']} ({server['path']})"
+            self.publish_report['servers'][server_key] = {
+                'projects': {},
+                'stats': {
+                    'new_files': 0,
+                    'updated_files': 0,
+                    'skipped_files': 0,
+                    'deleted_files': 0
+                }
+            }
+            self.current_server_key = server_key
             
-            sftp = ssh.open_sftp()
+            # 解析遠端路徑設定
+            remote_path = server['path']
+            remote_ip = server['ip']
+            remote_user = server['username']
+            remote_pass = server['password']
             
-            # 首先確保目標目錄存在
-            self.logger.info(f"確保目標目錄存在: {server['path']}")
-            if '\\' in server['path']:
-                # Windows命令 - 使用md來創建多層目錄
-                stdin, stdout, stderr = ssh.exec_command(f'if not exist "{server["path"]}" md "{server["path"]}"')
-                stdout.read()
-            else:
-                # Linux命令
-                stdin, stdout, stderr = ssh.exec_command(f"mkdir -p {server['path']}")
-                stdout.read()
-            
-            # 創建臨時目錄
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            temp_path = f"{server['path']}_TEMP_{timestamp}"
-            
-            # 創建遠程臨時目錄
-            self.logger.info(f"創建臨時目錄: {temp_path}")
-            if '\\' in server['path']:
-                # Windows命令 - 使用md來創建多層目錄
-                stdin, stdout, stderr = ssh.exec_command(f'md "{temp_path}" 2>nul')
-                stdout.read()  # 等待命令完成
-            else:
-                # Linux命令
-                stdin, stdout, stderr = ssh.exec_command(f"mkdir -p {temp_path}")
-                stdout.read()  # 等待命令完成
-            
-            # 處理每個源檔案/目錄作為獨立專案
-            for source in self.config['source_files']:
-                self.logger.info(f"處理源文件: {source}")
+            try:
+                drive_letter = remote_path.split(':')[0]
+                dir_path = remote_path.split(':')[1].lstrip('\\')
                 
-                if os.path.isfile(source):
-                    # 單一檔案 - 直接放在父目錄下
-                    project_name = os.path.splitext(os.path.basename(source))[0]
-                    project_temp_path = f"{temp_path}\\{project_name}" if '\\' in server['path'] else f"{temp_path}/{project_name}"
-                    project_temp_path_sftp = project_temp_path.replace('\\', '/')
-                    
-                    # 創建專案臨時目錄 (SSH命令)
-                    if '\\' in server['path']:
-                        stdin, stdout, stderr = ssh.exec_command(f'md "{project_temp_path}" 2>nul')
-                        stdout.read()  # 等待命令完成
+                # 完整的 UNC 目標路徑
+                full_unc_path = f"\\\\{remote_ip}\\{drive_letter}$\\{dir_path}"
+                share_to_map = f"\\\\{remote_ip}\\{drive_letter}$"
+                
+            except IndexError:
+                raise Exception(f"遠端路徑格式不正確: {remote_path}，應為 'D:\\資料夾' 格式")
+
+            # 網路連接命令
+            connection_command = [
+                "net", "use", share_to_map, remote_pass, f"/user:{remote_user}", "/persistent:no"
+            ]
+            disconnection_command = [
+                "net", "use", share_to_map, "/delete"
+            ]
+
+            try:
+                # 1. 建立網路連接
+                self.logger.info(f"正在連線至 {share_to_map}...")
+                subprocess.run(connection_command, check=True, capture_output=True)
+                self.logger.info("✅ 遠端主機連線成功")
+
+                # 2. 確保遠端目標目錄存在
+                if not os.path.exists(full_unc_path):
+                    self.logger.info(f"⚠️ 警告: 遠端目錄 '{full_unc_path}' 不存在，正在嘗試建立...")
+                    os.makedirs(full_unc_path)
+                
+                # 3. 合併式部署 - 覆蓋衝突檔案，保留其餘檔案
+                for source in self.config['source_files']:
+                    if os.path.isfile(source):
+                        project_name = os.path.splitext(os.path.basename(source))[0]
+                    elif os.path.isdir(source):
+                        project_name = os.path.basename(source)
                     else:
-                        stdin, stdout, stderr = ssh.exec_command(f"mkdir -p {project_temp_path}")
-                        stdout.read()  # 等待命令完成
+                        continue
+                        
+                    remote_target_dir = os.path.join(full_unc_path, project_name)
                     
-                    # 同時通過SFTP創建目錄（確保SFTP能夠訪問）
+                    # 初始化專案報告
+                    self.publish_report['servers'][self.current_server_key]['projects'][project_name] = {
+                        'files': [],
+                        'stats': {
+                            'new_files': 0,
+                            'updated_files': 0,
+                            'skipped_files': 0,
+                            'deleted_files': 0
+                        }
+                    }
+                    self.current_project = project_name
+                    
+                    self.logger.info(f"正在合併部署 '{source}' 至 '{remote_target_dir}'...")
+                    
                     try:
-                        sftp.mkdir(project_temp_path_sftp)
-                    except OSError:
-                        pass  # 目錄可能已存在
-                    
-                    remote_file = f"{project_temp_path_sftp}/{os.path.basename(source)}"
-                    self.logger.info(f"上傳單一檔案: {source} -> {remote_file}")
-                    sftp.put(source, remote_file)
-                    
-                elif os.path.isdir(source):
-                    # 目錄 - 以目錄名稱作為專案名稱
-                    project_name = os.path.basename(source)
-                    project_temp_path = f"{temp_path}\\{project_name}" if '\\' in server['path'] else f"{temp_path}/{project_name}"
-                    project_temp_path_sftp = project_temp_path.replace('\\', '/')
-                    
-                    self.logger.info(f"處理專案目錄: {source} -> {project_name}")
-                    
-                    # 創建專案臨時目錄 (SSH命令)
-                    if '\\' in server['path']:
-                        stdin, stdout, stderr = ssh.exec_command(f'md "{project_temp_path}" 2>nul')
-                        stdout.read()  # 等待命令完成
-                    else:
-                        stdin, stdout, stderr = ssh.exec_command(f"mkdir -p {project_temp_path}")
-                        stdout.read()  # 等待命令完成
-                    
-                    # 同時通過SFTP創建目錄（確保SFTP能夠訪問）
-                    try:
-                        sftp.mkdir(project_temp_path_sftp)
-                    except OSError:
-                        pass  # 目錄可能已存在
-                    
-                    # 上傳目錄內容到專案目錄（跳過需要刪除的檔案）
-                    for item in os.listdir(source):
-                        local_item = os.path.join(source, item)
+                        # 確保目標專案目錄存在
+                        if not os.path.exists(remote_target_dir):
+                            self.logger.info(f"  建立目標專案目錄: {remote_target_dir}")
+                            os.makedirs(remote_target_dir)
                         
-                        # 檢查是否為需要刪除的檔案，如果是則跳過上傳
-                        if item in self.config['delete_files']:
-                            self.logger.info(f"跳過上傳需刪除的檔案: {item}")
-                            continue
+                        if os.path.isfile(source):
+                            # 單一檔案處理 - 直接複製覆蓋
+                            target_file = os.path.join(remote_target_dir, os.path.basename(source))
+                            filename = os.path.basename(source)
+                            
+                            # 檢查是否為覆蓋還是新增
+                            if os.path.exists(target_file):
+                                # 比較檔案
+                                src_size = os.path.getsize(source)
+                                dst_size = os.path.getsize(target_file)
+                                src_mtime = os.path.getmtime(source)
+                                dst_mtime = os.path.getmtime(target_file)
+                                
+                                if src_size == dst_size and abs(src_mtime - dst_mtime) < 2:
+                                    operation_type = 'skipped'
+                                    operation_detail = "檔案內容相同"
+                                    self.logger.info(f"  ⏭️ 跳過相同檔案: {filename}")
+                                else:
+                                    operation_type = 'updated'
+                                    operation_detail = f"大小: {src_size} bytes, 修改時間: {datetime.fromtimestamp(src_mtime).strftime('%Y-%m-%d %H:%M:%S')}"
+                                    self.logger.info(f"  🔄 覆蓋檔案: {filename}")
+                                    shutil.copy2(source, target_file)
+                            else:
+                                operation_type = 'new'
+                                src_size = os.path.getsize(source)
+                                src_mtime = os.path.getmtime(source)
+                                operation_detail = f"大小: {src_size} bytes, 修改時間: {datetime.fromtimestamp(src_mtime).strftime('%Y-%m-%d %H:%M:%S')}"
+                                self.logger.info(f"  ➕ 新增檔案: {filename}")
+                                shutil.copy2(source, target_file)
+                            
+                            # 記錄檔案操作
+                            self._record_file_operation(operation_type, "", filename, operation_detail)
+                            
+                            # 更新進度
+                            if hasattr(self, 'update_progress'):
+                                self.update_progress(1)
+                            
+                        elif os.path.isdir(source):
+                            # 目錄處理 - 合併複製，保留不衝突的檔案
+                            self.logger.info(f"  📁 開始合併目錄內容...")
+                            self._merge_directory_to_target(source, remote_target_dir)
                         
-                        remote_item = f"{project_temp_path_sftp}/{item}"
+                        self.logger.info(f"  ✅ 專案 '{project_name}' 合併部署成功！")
                         
-                        if os.path.isfile(local_item):
-                            self.logger.info(f"上傳檔案: {local_item} -> {remote_item}")
-                            sftp.put(local_item, remote_item)
-                        elif os.path.isdir(local_item):
-                            self.logger.info(f"上傳子目錄: {local_item} -> {remote_item}")
-                            self._upload_directory(sftp, ssh, local_item, remote_item)
-                    
-            # 合併式部署 - 將新檔案與伺服器既有檔案合併
-            for source in self.config['source_files']:
-                if os.path.isfile(source):
-                    project_name = os.path.splitext(os.path.basename(source))[0]
-                elif os.path.isdir(source):
-                    project_name = os.path.basename(source)
-                else:
-                    continue
-                    
-                project_path = f"{server['path']}\\{project_name}" if '\\' in server['path'] else f"{server['path']}/{project_name}"
-                project_temp_path = f"{temp_path}\\{project_name}" if '\\' in server['path'] else f"{temp_path}/{project_name}"
+                    except Exception as e:
+                        self.logger.error(f"  ❌ 合併部署失敗: {e}")
+                        raise  # 重新拋出異常以中止後續操作
                 
-                self.logger.info(f"合併部署專案: {project_name}")
-                
-                # 確保目標專案目錄存在
-                if '\\' in server['path']:
-                    stdin, stdout, stderr = ssh.exec_command(f'if not exist "{project_path}" md "{project_path}"')
-                    stdout.read()
-                else:
-                    stdin, stdout, stderr = ssh.exec_command(f"mkdir -p {project_path}")
-                    stdout.read()
-                
-                if '\\' in server['path']:
-                    # Windows命令 - 使用xcopy進行合併複製（覆蓋既有檔案以更新功能）
-                    # /E: 複製目錄和子目錄，包括空目錄
-                    # /H: 複製隱藏和系統檔案
-                    # /K: 複製屬性
-                    # /Y: 自動覆蓋既有檔案（用於功能更新）
-                    stdin, stdout, stderr = ssh.exec_command(f'xcopy "{project_temp_path}\\*" "{project_path}" /E /H /K /Y')
-                    stdout.read()
-                else:
-                    # Linux命令 - 使用rsync覆蓋既有檔案
-                    stdin, stdout, stderr = ssh.exec_command(f"rsync -av {project_temp_path}/ {project_path}/")
-                    stdout.read()
-                
-                self.logger.info(f"專案 {project_name} 合併完成")
+                self.logger.info("✅ 所有專案合併式部署成功！")
+
+            except subprocess.CalledProcessError as e:
+                error_message = e.stderr.decode('cp950', errors='ignore') if e.stderr else str(e)
+                self.logger.error("❌ 錯誤: 建立遠端連線失敗")
+                self.logger.error("請確認：1.帳號密碼正確 2.防火牆設定 3.遠端主機已啟用系統管理分享(C$, D$)")
+                self.logger.error(f"詳細錯誤: {error_message.strip()}")
+                raise Exception(f"網路連線失敗: {error_message.strip()}")
             
-            # 清理臨時目錄
-            if '\\' in server['path']:
-                ssh.exec_command(f'rmdir /s /q "{temp_path}" 2>nul')
-            else:
-                ssh.exec_command(f"rm -rf {temp_path}")
+            finally:
+                # 4. 中斷連線
+                self.logger.info("正在中斷遠端連線...")
+                subprocess.run(disconnection_command, capture_output=True)
+                self.logger.info("--- 遠端傳輸流程結束 ---")
                 
-            self.logger.info("合併式部署完成")
+        except Exception as e:
+            self.logger.error(f"發布到伺服器失敗: {server['ip']} - {str(e)}")
+            raise
+    
+    def _record_file_operation(self, operation_type, relative_path, filename, detail):
+        """記錄檔案操作到報告中"""
+        if not hasattr(self, 'current_server_key') or not hasattr(self, 'current_project'):
+            return
             
-        finally:
-            sftp.close()
-            ssh.close()
-            
-    def _upload_directory(self, sftp, ssh, local_dir, remote_dir):
-        # SFTP路徑統一使用正斜線
-        remote_dir_sftp = remote_dir.replace('\\', '/')
-        
-        # 檢查是否為Windows系統來決定使用的SSH命令
-        if '\\' in remote_dir:
-            ssh.exec_command(f'md "{remote_dir}" 2>nul')
+        # 構建完整的檔案路徑
+        if relative_path:
+            full_path = f"{relative_path}/{filename}" if relative_path else filename
         else:
-            ssh.exec_command(f"mkdir -p {remote_dir}")
-        
-        for root, dirs, files in os.walk(local_dir):
-            # 創建遠程目錄結構
-            relative_path = os.path.relpath(root, local_dir)
-            if relative_path != '.':
-                remote_path = f"{remote_dir}/{relative_path}".replace('\\', '/')
-                remote_path_sftp = f"{remote_dir_sftp}/{relative_path}".replace('\\', '/')
-            else:
-                remote_path = remote_dir
-                remote_path_sftp = remote_dir_sftp
-                
-            # 創建目錄
-            if '\\' in remote_dir:
-                ssh.exec_command(f'md "{remote_path}" 2>nul')
-            else:
-                ssh.exec_command(f"mkdir -p {remote_path}")
+            full_path = filename
             
-            # 上傳檔案
-            for file in files:
-                local_file = os.path.join(root, file)
-                if relative_path != '.':
-                    remote_file = f"{remote_dir_sftp}/{relative_path}/{file}".replace('\\', '/')
+        # 記錄到專案報告
+        project_report = self.publish_report['servers'][self.current_server_key]['projects'][self.current_project]
+        project_report['files'].append({
+            'path': full_path,
+            'operation': operation_type,
+            'detail': detail,
+            'timestamp': datetime.now().strftime('%H:%M:%S')
+        })
+        
+        # 更新統計
+        if operation_type == 'new':
+            key = 'new_files'
+        elif operation_type == 'updated':
+            key = 'updated_files'
+        elif operation_type == 'skipped':
+            key = 'skipped_files'
+        elif operation_type == 'deleted':
+            key = 'deleted_files'
+        else:
+            return
+            
+        # 更新專案統計
+        project_report['stats'][key] += 1
+        
+        # 更新伺服器統計
+        self.publish_report['servers'][self.current_server_key]['stats'][key] += 1
+        
+        # 更新總體統計
+        self.publish_report['total_stats'][key] += 1
+    
+    def _merge_directory_to_target(self, src_dir, dst_dir, relative_path=""):
+        """合併式複製目錄到目標位置，覆蓋衝突檔案，保留不衝突檔案"""
+        # 確保目標目錄存在
+        if not os.path.exists(dst_dir):
+            os.makedirs(dst_dir)
+        
+        for item in os.listdir(src_dir):
+            # 檢查是否為需要刪除的檔案，如果是則跳過
+            if item in self.config['delete_files']:
+                self.logger.info(f"    ⏭️ 跳過複製需刪除的檔案: {item}")
+                self._record_file_operation('deleted', relative_path, item, "跳過複製需刪除的檔案")
+                continue
+                
+            src_item = os.path.join(src_dir, item)
+            dst_item = os.path.join(dst_dir, item)
+            item_relative_path = os.path.join(relative_path, item) if relative_path else item
+            
+            if os.path.isfile(src_item):
+                # 檔案處理：檢查是否需要複製
+                should_copy = True
+                operation_type = 'new'
+                operation_detail = ""
+                
+                if os.path.exists(dst_item):
+                    # 比較檔案大小和修改時間
+                    src_size = os.path.getsize(src_item)
+                    dst_size = os.path.getsize(dst_item)
+                    src_mtime = os.path.getmtime(src_item)
+                    dst_mtime = os.path.getmtime(dst_item)
+                    
+                    if src_size == dst_size and abs(src_mtime - dst_mtime) < 2:
+                        # 檔案相同，跳過複製
+                        self.logger.info(f"    ⏭️ 跳過相同檔案: {item}")
+                        should_copy = False
+                        operation_type = 'skipped'
+                        operation_detail = "檔案內容相同"
+                        # 更新進度
+                        if hasattr(self, 'update_progress'):
+                            self.update_progress(1)
+                    else:
+                        self.logger.info(f"    🔄 覆蓋檔案: {item} (大小或時間不同)")
+                        operation_type = 'updated'
+                        operation_detail = f"大小: {src_size} bytes, 修改時間: {datetime.fromtimestamp(src_mtime).strftime('%Y-%m-%d %H:%M:%S')}"
                 else:
-                    remote_file = f"{remote_dir_sftp}/{file}"
-                sftp.put(local_file, remote_file)
+                    self.logger.info(f"    ➕ 新增檔案: {item}")
+                    operation_type = 'new'
+                    src_size = os.path.getsize(src_item)
+                    src_mtime = os.path.getmtime(src_item)
+                    operation_detail = f"大小: {src_size} bytes, 修改時間: {datetime.fromtimestamp(src_mtime).strftime('%Y-%m-%d %H:%M:%S')}"
+                
+                # 記錄檔案操作
+                self._record_file_operation(operation_type, relative_path, item, operation_detail)
+                
+                if should_copy:
+                    shutil.copy2(src_item, dst_item)
+                    # 更新進度
+                    if hasattr(self, 'update_progress'):
+                        self.update_progress(1)
+                
+            elif os.path.isdir(src_item):
+                # 目錄處理：遞迴合併
+                if os.path.exists(dst_item):
+                    self.logger.info(f"    📁 合併目錄: {item}")
+                else:
+                    self.logger.info(f"    📁 建立目錄: {item}")
+                self._merge_directory_to_target(src_item, dst_item, item_relative_path)
+            
+
                 
     def load_config(self):
         try:
@@ -1414,6 +2354,94 @@ class WebsitePublisher:
             if self.publish_timer:
                 self.publish_timer.cancel()
 
+    def get_directory_info(self, directory):
+        """獲取資料夾的檔案數量和總大小"""
+        total_files = 0
+        total_size = 0
+        
+        for root, dirs, files in os.walk(directory):
+            total_files += len(files)
+            for file in files:
+                file_path = os.path.join(root, file)
+                try:
+                    total_size += os.path.getsize(file_path)
+                except (OSError, IOError):
+                    # 跳過無法存取的檔案
+                    pass
+        
+        return total_files, total_size
+
+    def format_size(self, size_bytes):
+        """格式化檔案大小顯示"""
+        if size_bytes < 1024:
+            return f"{size_bytes} B"
+        elif size_bytes < 1024 * 1024:
+            return f"{size_bytes / 1024:.1f} KB"
+        elif size_bytes < 1024 * 1024 * 1024:
+            return f"{size_bytes / (1024 * 1024):.1f} MB"
+        else:
+            return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
+
+    def show_progress(self, current, total, prefix="Progress", bar_length=50):
+        """顯示進度條"""
+        percent = (current / total) * 100
+        filled_length = int(bar_length * current // total)
+        bar = '█' * filled_length + '-' * (bar_length - filled_length)
+        
+        sys.stdout.write(f'\r{prefix}: |{bar}| {current}/{total} ({percent:.1f}%)')
+        sys.stdout.flush()
+        
+        if current == total:
+            print()  # 完成後換行
+
+    def copytree_with_progress(self, src, dst):
+        """帶進度條的資料夾複製"""
+        print(f"  正在分析資料夾結構...")
+        total_files, total_size = self.get_directory_info(src)
+        
+        print(f"  檔案數量: {total_files}")
+        print(f"  總大小: {self.format_size(total_size)}")
+        
+        copied_files = 0
+        copied_size = 0
+        
+        def copy_function(src_file, dst_file):
+            nonlocal copied_files, copied_size
+            
+            # 建立目標目錄
+            dst_dir = os.path.dirname(dst_file)
+            if not os.path.exists(dst_dir):
+                os.makedirs(dst_dir)
+            
+            # 複製檔案
+            shutil.copy2(src_file, dst_file)
+            
+            # 更新進度
+            try:
+                file_size = os.path.getsize(src_file)
+                copied_size += file_size
+            except (OSError, IOError):
+                pass
+            
+            copied_files += 1
+            self.show_progress(copied_files, total_files, "複製進度")
+        
+        # 遞迴複製所有檔案
+        def copy_tree_recursive(src_path, dst_path):
+            if not os.path.exists(dst_path):
+                os.makedirs(dst_path)
+            
+            for item in os.listdir(src_path):
+                src_item = os.path.join(src_path, item)
+                dst_item = os.path.join(dst_path, item)
+                
+                if os.path.isdir(src_item):
+                    copy_tree_recursive(src_item, dst_item)
+                else:
+                    copy_function(src_item, dst_item)
+        
+        copy_tree_recursive(src, dst)
+
 
 class ServerDialog:
     def __init__(self, parent, server_info=None):
@@ -1422,7 +2450,7 @@ class ServerDialog:
         
         self.dialog = tk.Toplevel(parent)
         self.dialog.title("編輯伺服器" if server_info else "新增伺服器")
-        self.dialog.geometry("700x300")
+        self.dialog.geometry("700x350")
         self.dialog.resizable(False, False)
         self.dialog.grab_set()
         
@@ -1435,21 +2463,32 @@ class ServerDialog:
         main_frame = ttk.Frame(self.dialog, padding="20")
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
+        # 說明標題
+        title_label = ttk.Label(main_frame, text="Windows網路共享設定", font=('Arial', 12, 'bold'))
+        title_label.grid(row=0, column=0, columnspan=2, pady=(0, 10))
+        
+        # 說明文字
+        help_text = "此設定使用Windows網路共享方式(UNC路徑)連接到遠端伺服器，無需設定SSH。\n請確保遠端伺服器已啟用系統管理分享(如C$, D$)。"
+        help_label = ttk.Label(main_frame, text=help_text, foreground="blue", wraplength=650)
+        help_label.grid(row=1, column=0, columnspan=2, pady=(0, 15))
+        
         # IP地址
-        ttk.Label(main_frame, text="IP地址:").grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
+        ttk.Label(main_frame, text="遠端主機IP:").grid(row=2, column=0, sticky=tk.W, pady=(0, 5))
         self.ip_var = tk.StringVar()
-        ttk.Entry(main_frame, textvariable=self.ip_var, width=80).grid(row=0, column=1, sticky=(tk.W, tk.E), pady=(0, 5))
+        ip_entry = ttk.Entry(main_frame, textvariable=self.ip_var, width=80)
+        ip_entry.grid(row=2, column=1, sticky=(tk.W, tk.E), pady=(0, 5))
         
         # 使用者名稱
-        ttk.Label(main_frame, text="使用者名稱:").grid(row=1, column=0, sticky=tk.W, pady=(0, 5))
+        ttk.Label(main_frame, text="管理員帳號:").grid(row=3, column=0, sticky=tk.W, pady=(0, 5))
         self.username_var = tk.StringVar()
-        ttk.Entry(main_frame, textvariable=self.username_var, width=80).grid(row=1, column=1, sticky=(tk.W, tk.E), pady=(0, 5))
+        username_entry = ttk.Entry(main_frame, textvariable=self.username_var, width=80)
+        username_entry.grid(row=3, column=1, sticky=(tk.W, tk.E), pady=(0, 5))
         
         # 密碼
-        ttk.Label(main_frame, text="密碼:").grid(row=2, column=0, sticky=tk.W, pady=(0, 5))
+        ttk.Label(main_frame, text="管理員密碼:").grid(row=4, column=0, sticky=tk.W, pady=(0, 5))
         self.password_var = tk.StringVar()
         password_frame = ttk.Frame(main_frame)
-        password_frame.grid(row=2, column=1, sticky=(tk.W, tk.E), pady=(0, 5))
+        password_frame.grid(row=4, column=1, sticky=(tk.W, tk.E), pady=(0, 5))
         
         self.password_entry = ttk.Entry(password_frame, textvariable=self.password_var, width=25, show="*")
         self.password_entry.grid(row=0, column=0, sticky=(tk.W, tk.E))
@@ -1460,14 +2499,14 @@ class ServerDialog:
         password_frame.columnconfigure(0, weight=1)
         
         # 目標路徑
-        ttk.Label(main_frame, text="目標路徑:").grid(row=3, column=0, sticky=tk.W, pady=(0, 5))
+        ttk.Label(main_frame, text="目標路徑:").grid(row=5, column=0, sticky=tk.W, pady=(0, 5))
         self.path_var = tk.StringVar()
-        ttk.Entry(main_frame, textvariable=self.path_var, width=80).grid(row=3, column=1, sticky=(tk.W, tk.E), pady=(0, 5))
+        path_entry = ttk.Entry(main_frame, textvariable=self.path_var, width=80)
+        path_entry.grid(row=5, column=1, sticky=(tk.W, tk.E), pady=(0, 5))
         
-        # 連接埠 (可選)
-        ttk.Label(main_frame, text="SSH埠號:").grid(row=4, column=0, sticky=tk.W, pady=(0, 15))
-        self.port_var = tk.StringVar(value="22")
-        ttk.Entry(main_frame, textvariable=self.port_var, width=80).grid(row=4, column=1, sticky=(tk.W, tk.E), pady=(0, 15))
+        # 路徑說明
+        path_help = "格式: D:\\VSCC_3G1 (必須包含磁碟機代號，系統會自動轉換為UNC路徑)"
+        ttk.Label(main_frame, text=path_help, foreground="gray", font=('Arial', 8)).grid(row=6, column=1, sticky=tk.W, pady=(0, 15))
         
         # 如果是編輯模式，填入現有資料
         if self.server_info:
@@ -1475,11 +2514,15 @@ class ServerDialog:
             self.username_var.set(self.server_info.get('username', ''))
             self.password_var.set(self.server_info.get('password', ''))
             self.path_var.set(self.server_info.get('path', ''))
-            self.port_var.set(str(self.server_info.get('port', 22)))
+        
+        # 設定預設值
+        if not self.server_info:
+            self.username_var.set("Administrator")
+            self.path_var.set("D:\\VSCC_3G1")
         
         # 按鈕
         button_frame = ttk.Frame(main_frame)
-        button_frame.grid(row=5, column=0, columnspan=2, pady=(10, 0))
+        button_frame.grid(row=7, column=0, columnspan=2, pady=(10, 0))
         
         ttk.Button(button_frame, text="測試連接", command=self.test_connection).grid(row=0, column=0, padx=(0, 10))
         ttk.Button(button_frame, text="確定", command=self.ok_clicked).grid(row=0, column=1, padx=(0, 10))
@@ -1494,16 +2537,15 @@ class ServerDialog:
             self.password_entry.configure(show="*")
             
     def test_connection(self):
-        if not all([self.ip_var.get(), self.username_var.get(), self.password_var.get()]):
-            messagebox.showerror("錯誤", "請填寫IP、使用者名稱和密碼")
+        if not all([self.ip_var.get(), self.username_var.get(), self.password_var.get(), self.path_var.get()]):
+            messagebox.showerror("錯誤", "請填寫所有必要欄位")
             return
             
         server_info = {
             'ip': self.ip_var.get(),
             'username': self.username_var.get(),
             'password': self.password_var.get(),
-            'path': self.path_var.get() or '/tmp',
-            'port': int(self.port_var.get()) if self.port_var.get().isdigit() else 22
+            'path': self.path_var.get()
         }
         
         # 在新線程中測試連接
@@ -1513,43 +2555,70 @@ class ServerDialog:
         
     def _test_connection(self, server_info):
         try:
-            ssh = paramiko.SSHClient()
-            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            # 解析遠端路徑
+            remote_path = server_info['path']
+            remote_ip = server_info['ip']
+            remote_user = server_info['username']
+            remote_pass = server_info['password']
             
-            ssh.connect(
-                hostname=server_info['ip'],
-                username=server_info['username'],
-                password=server_info['password'],
-                port=server_info['port'],
-                timeout=10
-            )
-            
-            stdin, stdout, stderr = ssh.exec_command('echo "Connection test successful"')
-            result = stdout.read().decode().strip()
-            ssh.close()
-            
-            self.dialog.after(0, lambda: messagebox.showinfo("連接測試", 
-                f"連接測試成功！\n伺服器: {server_info['ip']}:{server_info['port']}"))
+            try:
+                drive_letter = remote_path.split(':')[0]
+                dir_path = remote_path.split(':')[1].lstrip('\\')
                 
+                # 完整的 UNC 目標路徑
+                full_unc_path = f"\\\\{remote_ip}\\{drive_letter}$\\{dir_path}"
+                share_to_map = f"\\\\{remote_ip}\\{drive_letter}$"
+                
+            except IndexError:
+                error_msg = f"遠端路徑格式不正確: {remote_path}\n應為 'D:\\資料夾' 格式"
+                self.dialog.after(0, lambda: messagebox.showerror("路徑錯誤", error_msg))
+                return
+
+            # 網路連接命令
+            connection_command = [
+                "net", "use", share_to_map, remote_pass, f"/user:{remote_user}", "/persistent:no"
+            ]
+            disconnection_command = [
+                "net", "use", share_to_map, "/delete"
+            ]
+
+            # 測試網路連接
+            subprocess.run(connection_command, check=True, capture_output=True, text=True)
+            
+            # 測試目標路徑存取
+            access_test = os.path.exists(full_unc_path)
+            
+            # 中斷連接
+            subprocess.run(disconnection_command, capture_output=True)
+            
+            if access_test:
+                success_msg = f"連接測試成功！\n伺服器: {server_info['ip']}\n網路路徑: {full_unc_path}\n狀態: 可正常存取"
+                self.dialog.after(0, lambda: messagebox.showinfo("連接測試", success_msg))
+            else:
+                warning_msg = f"連接成功但路徑不存在！\n伺服器: {server_info['ip']}\n網路路徑: {full_unc_path}\n建議檢查路徑設定或手動建立資料夾"
+                self.dialog.after(0, lambda: messagebox.showwarning("連接測試", warning_msg))
+                
+        except subprocess.CalledProcessError as e:
+            error_message = e.stderr if e.stderr else str(e)
+            error_msg = f"網路共享連接失敗\n伺服器: {server_info['ip']}\n\n可能原因:\n1. 帳號密碼錯誤\n2. 網路不通\n3. 遠端主機未啟用系統管理分享(C$, D$)\n4. 防火牆阻擋\n\n詳細錯誤: {error_message}"
+            self.dialog.after(0, lambda: messagebox.showerror("連接測試失敗", error_msg))
+            
         except Exception as e:
-            error_msg = f"連接失敗: {str(e)}\n\n可能原因:\n1. IP地址或埠號錯誤\n2. 使用者名稱或密碼錯誤\n3. SSH服務未啟動\n4. 網路不通或防火牆阻擋"
+            error_msg = f"連接失敗: {str(e)}\n\n可能原因:\n1. IP地址錯誤\n2. 網路不通\n3. 遠端主機未開機\n4. 防火牆阻擋"
             self.dialog.after(0, lambda: messagebox.showerror("連接測試失敗", error_msg))
         
     def ok_clicked(self):
         if all([self.ip_var.get(), self.username_var.get(), self.password_var.get(), self.path_var.get()]):
-            port = 22
-            if self.port_var.get().isdigit():
-                port = int(self.port_var.get())
-            elif self.port_var.get():
-                messagebox.showerror("錯誤", "SSH埠號必須是數字")
+            # 簡單驗證路徑格式
+            if ':' not in self.path_var.get():
+                messagebox.showerror("錯誤", "路徑格式不正確，應為 'D:\\資料夾' 格式")
                 return
                 
             self.result = {
                 'ip': self.ip_var.get(),
                 'username': self.username_var.get(),
                 'password': self.password_var.get(),
-                'path': self.path_var.get(),
-                'port': port
+                'path': self.path_var.get()
             }
             self.dialog.destroy()
         else:
@@ -1569,8 +2638,6 @@ if __name__ == "__main__":
         app.run()
     except KeyboardInterrupt:
         print("程式被使用者中斷")
-        if 'app' in locals():
-            app._send_error_notification("使用者中斷", "程式被使用者手動中斷 (Ctrl+C)")
     except Exception as e:
         print(f"程式發生未預期的錯誤: {e}")
         if 'app' in locals():
