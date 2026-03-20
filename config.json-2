@@ -1,0 +1,31 @@
+{
+  "source_files": [
+    "D:/WebSite_4Code/TASB2C",
+    "D:/WebSite_4Code/TASSystem"
+  ],
+  "delete_files": [
+    "Web.config",
+    "web.config",
+    "Web.Debug.config",
+    "Web.Release.config"
+  ],
+  "servers": [
+    {
+      "ip": "192.168.80.203",
+      "username": "Administrator",
+      "password": "1qaz@WSX!",
+      "path": "D:\\\\VSCC_3G_4Code_V2"
+    }
+  ],
+  "schedule_time": null,
+  "smtp_config": {
+    "smtp_server": "192.168.80.60",
+    "smtp_port": 25,
+    "username": "",
+    "password": "",
+    "use_tls": false
+  },
+  "notification_emails": [
+    "cwt02014@vscc.org.tw"
+  ]
+}

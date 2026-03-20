@@ -42,6 +42,12 @@ class WebsitePublisher:
             'notification_emails': []
         }
         
+        # 專案管理
+        self.current_project_name = None
+        self._ensure_configs_dir()
+        self._migrate_old_config()
+        self.current_project_name = self._load_last_project()
+        
         # 定時器變量
         self.publish_timer = None
         self.countdown_timer = None
@@ -51,7 +57,7 @@ class WebsitePublisher:
         self.create_gui()
         
         # 載入配置
-        self.load_config()
+        self.load_config(self.current_project_name)
         
         # 設置GUI日誌處理器
         self.setup_gui_logging()
@@ -82,14 +88,18 @@ class WebsitePublisher:
         # 設置日誌格式
         log_format = '%(asctime)s - %(levelname)s - %(message)s'
         
-        # 配置日誌
+        # 配置日誌處理器
+        handlers = [
+            logging.FileHandler(f'logs/publish_{datetime.now().strftime("%Y%m%d")}.log', encoding='utf-8')
+        ]
+        # pythonw 下 sys.stderr 為 None，不加 StreamHandler 以避免錯誤
+        if sys.stderr is not None:
+            handlers.append(logging.StreamHandler())
+        
         logging.basicConfig(
             level=logging.INFO,
             format=log_format,
-            handlers=[
-                logging.FileHandler(f'logs/publish_{datetime.now().strftime("%Y%m%d")}.log', encoding='utf-8'),
-                logging.StreamHandler()
-            ]
+            handlers=handlers
         )
         
         self.logger = logging.getLogger(__name__)
@@ -98,6 +108,177 @@ class WebsitePublisher:
         self.gui_log_handler = None
         
         self.logger.info("網站發布助手啟動")
+
+    # ── 專案管理方法 ──
+
+    def _ensure_configs_dir(self):
+        if not os.path.exists('configs'):
+            os.makedirs('configs')
+
+    def _migrate_old_config(self):
+        """將舊的 config.json 遷移至 configs/預設專案.json"""
+        old_config = 'config.json'
+        default_project_file = os.path.join('configs', '預設專案.json')
+        if os.path.exists(old_config) and not os.path.exists(default_project_file):
+            shutil.copy2(old_config, default_project_file)
+            self.logger.info("已將舊 config.json 遷移至 configs/預設專案.json")
+
+    def _load_last_project(self):
+        try:
+            if os.path.exists('last_project.json'):
+                with open('last_project.json', 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    name = data.get('project_name', '')
+                    if name and os.path.exists(os.path.join('configs', f'{name}.json')):
+                        return name
+        except Exception:
+            pass
+        projects = self.list_projects()
+        return projects[0] if projects else '預設專案'
+
+    def _save_last_project(self, name):
+        try:
+            with open('last_project.json', 'w', encoding='utf-8') as f:
+                json.dump({'project_name': name}, f, ensure_ascii=False)
+        except Exception as e:
+            self.logger.error(f"儲存上次專案失敗: {e}")
+
+    def list_projects(self):
+        self._ensure_configs_dir()
+        projects = []
+        for f in sorted(os.listdir('configs')):
+            if f.endswith('.json') and not f.endswith('.snapshot.json'):
+                projects.append(f[:-5])
+        return projects
+
+    def switch_project(self, project_name):
+        if project_name == self.current_project_name:
+            return
+        self.save_config()
+        # 取消現有定時器
+        if self.publish_timer:
+            self.publish_timer.cancel()
+            self.publish_timer = None
+        self.is_countdown_active = False
+        self._reset_config()
+        self.load_config(project_name)
+        # 若新專案無排程，重置排程顯示
+        if not self.config.get('schedule_time'):
+            if hasattr(self, 'next_publish_var'):
+                self.next_publish_var.set("無排程")
+            if hasattr(self, 'countdown_var'):
+                self.countdown_var.set("")
+        self._save_last_project(project_name)
+        self.root.title(f"網站發布助手 - {project_name}")
+        self.logger.info(f"已切換至專案: {project_name}")
+
+    def _reset_config(self):
+        self.config = {
+            'source_files': [],
+            'delete_files': [],
+            'servers': [],
+            'schedule_time': None,
+            'smtp_config': {
+                'smtp_server': '',
+                'smtp_port': 587,
+                'username': '',
+                'password': '',
+                'use_tls': True
+            },
+            'notification_emails': []
+        }
+
+    def _on_project_selected(self, event=None):
+        selected = self.project_combo.get()
+        if selected and selected != self.current_project_name:
+            self.switch_project(selected)
+
+    def _new_project(self):
+        from tkinter import simpledialog
+        name = simpledialog.askstring("新增專案", "請輸入專案名稱:", parent=self.root)
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        config_path = os.path.join('configs', f'{name}.json')
+        if os.path.exists(config_path):
+            messagebox.showwarning("警告", f"專案 '{name}' 已存在")
+            return
+        with open(config_path, 'w', encoding='utf-8') as f:
+            json.dump({
+                'source_files': [], 'delete_files': [], 'servers': [],
+                'schedule_time': None,
+                'smtp_config': {'smtp_server': '', 'smtp_port': 587, 'username': '', 'password': '', 'use_tls': True},
+                'notification_emails': []
+            }, f, ensure_ascii=False, indent=2)
+        self._refresh_project_combo()
+        self.project_combo.set(name)
+        self.switch_project(name)
+
+    def _copy_project(self):
+        from tkinter import simpledialog
+        name = simpledialog.askstring("複製專案", "請輸入新專案名稱:", parent=self.root,
+                                      initialvalue=f"{self.current_project_name} - 副本")
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        config_path = os.path.join('configs', f'{name}.json')
+        if os.path.exists(config_path):
+            messagebox.showwarning("警告", f"專案 '{name}' 已存在")
+            return
+        self.save_config()
+        src = os.path.join('configs', f'{self.current_project_name}.json')
+        if os.path.exists(src):
+            shutil.copy2(src, config_path)
+        self._refresh_project_combo()
+        self.project_combo.set(name)
+        self.switch_project(name)
+
+    def _delete_project(self):
+        if len(self.list_projects()) <= 1:
+            messagebox.showwarning("警告", "至少需保留一個專案")
+            return
+        if not messagebox.askyesno("確認刪除", f"確定要刪除專案 '{self.current_project_name}' 嗎？\n此操作無法復原！"):
+            return
+        config_path = os.path.join('configs', f'{self.current_project_name}.json')
+        snapshot_path = os.path.join('configs', f'{self.current_project_name}.snapshot.json')
+        if os.path.exists(config_path):
+            os.remove(config_path)
+        if os.path.exists(snapshot_path):
+            os.remove(snapshot_path)
+        projects = self.list_projects()
+        new_name = projects[0] if projects else '預設專案'
+        self._refresh_project_combo()
+        self.project_combo.set(new_name)
+        self.current_project_name = None
+        self.switch_project(new_name)
+
+    def _rename_project(self):
+        from tkinter import simpledialog
+        new_name = simpledialog.askstring("重新命名", "請輸入新的專案名稱:",
+                                          parent=self.root, initialvalue=self.current_project_name)
+        if not new_name or not new_name.strip() or new_name.strip() == self.current_project_name:
+            return
+        new_name = new_name.strip()
+        new_path = os.path.join('configs', f'{new_name}.json')
+        if os.path.exists(new_path):
+            messagebox.showwarning("警告", f"專案 '{new_name}' 已存在")
+            return
+        old_path = os.path.join('configs', f'{self.current_project_name}.json')
+        old_snap = os.path.join('configs', f'{self.current_project_name}.snapshot.json')
+        new_snap = os.path.join('configs', f'{new_name}.snapshot.json')
+        if os.path.exists(old_path):
+            os.rename(old_path, new_path)
+        if os.path.exists(old_snap):
+            os.rename(old_snap, new_snap)
+        self.current_project_name = new_name
+        self._save_last_project(new_name)
+        self._refresh_project_combo()
+        self.project_combo.set(new_name)
+        self.root.title(f"網站發布助手 - {new_name}")
+
+    def _refresh_project_combo(self):
+        projects = self.list_projects()
+        self.project_combo['values'] = projects
         
     def create_gui(self):
         # 主框架
@@ -106,11 +287,28 @@ class WebsitePublisher:
         
         # 標題
         title_label = ttk.Label(main_frame, text="網站發布助手", font=('Arial', 16, 'bold'))
-        title_label.grid(row=0, column=0, columnspan=2, pady=(0, 20))
+        title_label.grid(row=0, column=0, columnspan=2, pady=(0, 10))
         
+        # 專案管理列
+        project_frame = ttk.LabelFrame(main_frame, text="專案", padding="5")
+        project_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+
+        ttk.Label(project_frame, text="目前專案:").grid(row=0, column=0, padx=(0, 5))
+        self.project_combo = ttk.Combobox(project_frame, state='readonly', width=25)
+        self.project_combo.grid(row=0, column=1, padx=(0, 10))
+        self.project_combo.bind('<<ComboboxSelected>>', self._on_project_selected)
+        self._refresh_project_combo()
+        if self.current_project_name:
+            self.project_combo.set(self.current_project_name)
+
+        ttk.Button(project_frame, text="新增", width=6, command=self._new_project).grid(row=0, column=2, padx=2)
+        ttk.Button(project_frame, text="複製", width=6, command=self._copy_project).grid(row=0, column=3, padx=2)
+        ttk.Button(project_frame, text="重新命名", width=8, command=self._rename_project).grid(row=0, column=4, padx=2)
+        ttk.Button(project_frame, text="刪除", width=6, command=self._delete_project).grid(row=0, column=5, padx=2)
+
         # 創建筆記本控件（分頁）
         notebook = ttk.Notebook(main_frame)
-        notebook.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+        notebook.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
         
         # 設定頁面
         self.create_settings_tab(notebook)
@@ -127,13 +325,13 @@ class WebsitePublisher:
         # 狀態欄
         self.status_var = tk.StringVar(value="就緒")
         status_label = ttk.Label(main_frame, textvariable=self.status_var)
-        status_label.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E))
+        status_label.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E))
         
         # 配置權重
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         main_frame.columnconfigure(0, weight=1)
-        main_frame.rowconfigure(1, weight=1)
+        main_frame.rowconfigure(2, weight=1)
         
     def create_settings_tab(self, notebook):
         settings_frame = ttk.Frame(notebook, padding="10")
@@ -1254,6 +1452,10 @@ class WebsitePublisher:
     def _publish_worker(self):
         start_time = datetime.now()
         
+        # 載入快照供差異比對
+        self._current_old_snapshots = self._load_snapshot()
+        self._current_new_snapshots = {}
+        
         # 初始化發布報告
         self.publish_report = {
             'servers': {},
@@ -1324,6 +1526,11 @@ class WebsitePublisher:
         try:
             # 完成進度條
             self.init_progress(0)
+            
+            # 儲存快照供下次差異比對
+            if hasattr(self, '_current_new_snapshots') and self._current_new_snapshots:
+                self._save_snapshot(self._current_new_snapshots)
+                self.logger.info("已更新發布快照")
             
             # 保存到發布歷史（不觸發GUI刷新）
             self.save_history_record(self.publish_report, is_success=True)
@@ -2129,7 +2336,26 @@ class WebsitePublisher:
                         elif os.path.isdir(source):
                             # 目錄處理 - 合併複製，保留不衝突的檔案
                             self.logger.info(f"  📁 開始合併目錄內容...")
-                            self._merge_directory_to_target(source, remote_target_dir)
+                            
+                            changed_dirs = None
+                            snapshot_key = f"{server['ip']}_{server['path']}_{project_name}"
+                            old_snapshot = self._current_old_snapshots.get(snapshot_key, {})
+                            if old_snapshot:
+                                current_snap = self._build_source_snapshot(source)
+                                self._current_new_snapshots[snapshot_key] = current_snap
+                                changed_dirs = self._compute_changed_dirs(current_snap, old_snapshot)
+                                if not changed_dirs:
+                                    skip_count = self._count_dir_files(source)
+                                    self.logger.info(f"  ⏩ 整個專案無變更，跳過 {skip_count} 個檔案")
+                                    if hasattr(self, 'update_progress'):
+                                        self.update_progress(skip_count)
+                                    self.logger.info(f"  ✅ 專案 '{project_name}' 無需更新")
+                                    continue
+                                self.logger.info(f"  📊 偵測到 {len(changed_dirs)} 個有變更的目錄")
+                            else:
+                                self._current_new_snapshots[snapshot_key] = self._build_source_snapshot(source)
+                            
+                            self._merge_directory_to_target(source, remote_target_dir, changed_dirs=changed_dirs)
                         
                         self.logger.info(f"  ✅ 專案 '{project_name}' 合併部署成功！")
                         
@@ -2197,43 +2423,124 @@ class WebsitePublisher:
         # 更新總體統計
         self.publish_report['total_stats'][key] += 1
     
-    def _merge_directory_to_target(self, src_dir, dst_dir, relative_path=""):
-        """合併式複製目錄到目標位置，覆蓋衝突檔案，保留不衝突檔案"""
-        # 確保目標目錄存在
+    # ── 快照與差異比對 ──
+
+    def _get_snapshot_path(self):
+        project_name = self.current_project_name or '預設專案'
+        return os.path.join('configs', f'{project_name}.snapshot.json')
+
+    def _load_snapshot(self):
+        path = self._get_snapshot_path()
+        if os.path.exists(path):
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {}
+
+    def _save_snapshot(self, snapshot):
+        path = self._get_snapshot_path()
+        try:
+            self._ensure_configs_dir()
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(snapshot, f, ensure_ascii=False)
+        except Exception as e:
+            self.logger.error(f"儲存快照失敗: {e}")
+
+    def _build_source_snapshot(self, source_dir):
+        """遞迴掃描 source_dir，回傳 {relative_path: {size, mtime}} 字典"""
+        snapshot = {}
+        base = source_dir
+        for dirpath, dirnames, filenames in os.walk(base):
+            for fname in filenames:
+                if fname in self.config['delete_files']:
+                    continue
+                full = os.path.join(dirpath, fname)
+                rel = os.path.relpath(full, base)
+                try:
+                    st = os.stat(full)
+                    snapshot[rel] = {'size': st.st_size, 'mtime': st.st_mtime}
+                except OSError:
+                    pass
+        return snapshot
+
+    def _compute_changed_dirs(self, current_snapshot, old_snapshot):
+        """比對兩份快照，回傳有變更的目錄路徑集合（含祖先目錄）"""
+        changed = set()
+        all_keys = set(current_snapshot.keys()) | set(old_snapshot.keys())
+        for rel_path in all_keys:
+            cur = current_snapshot.get(rel_path)
+            old = old_snapshot.get(rel_path)
+            is_changed = False
+            if cur is None or old is None:
+                is_changed = True
+            elif cur['size'] != old['size'] or abs(cur['mtime'] - old['mtime']) >= 2:
+                is_changed = True
+            if is_changed:
+                parent = os.path.dirname(rel_path)
+                while parent:
+                    changed.add(parent)
+                    parent = os.path.dirname(parent)
+                changed.add('')
+        return changed
+
+    def _count_dir_files(self, src_dir):
+        """計算目錄下的檔案數（排除 delete_files），用於跳過目錄時批次更新進度"""
+        count = 0
+        for _, _, filenames in os.walk(src_dir):
+            for fname in filenames:
+                if fname not in self.config['delete_files']:
+                    count += 1
+        return count
+
+    def _merge_directory_to_target(self, src_dir, dst_dir, relative_path="", changed_dirs=None):
+        """合併式複製目錄到目標位置，覆蓋衝突檔案，保留不衝突檔案
+        
+        changed_dirs: 若提供，只處理有變更的目錄；None 表示全部處理（首次無快照時）
+        """
         if not os.path.exists(dst_dir):
             os.makedirs(dst_dir)
         
-        for item in os.listdir(src_dir):
-            # 檢查是否為需要刪除的檔案，如果是則跳過
+        try:
+            entries = list(os.scandir(src_dir))
+        except OSError as e:
+            self.logger.error(f"無法讀取目錄 {src_dir}: {e}")
+            return
+
+        for entry in entries:
+            item = entry.name
             if item in self.config['delete_files']:
                 self.logger.info(f"    ⏭️ 跳過複製需刪除的檔案: {item}")
                 self._record_file_operation('deleted', relative_path, item, "跳過複製需刪除的檔案")
                 continue
                 
-            src_item = os.path.join(src_dir, item)
+            src_item = entry.path
             dst_item = os.path.join(dst_dir, item)
             item_relative_path = os.path.join(relative_path, item) if relative_path else item
             
-            if os.path.isfile(src_item):
-                # 檔案處理：檢查是否需要複製
+            if entry.is_file(follow_symlinks=False):
                 should_copy = True
                 operation_type = 'new'
                 operation_detail = ""
                 
+                try:
+                    src_stat = entry.stat()
+                    src_size = src_stat.st_size
+                    src_mtime = src_stat.st_mtime
+                except OSError:
+                    src_size = 0
+                    src_mtime = 0
+
                 if os.path.exists(dst_item):
-                    # 比較檔案大小和修改時間
-                    src_size = os.path.getsize(src_item)
                     dst_size = os.path.getsize(dst_item)
-                    src_mtime = os.path.getmtime(src_item)
                     dst_mtime = os.path.getmtime(dst_item)
                     
                     if src_size == dst_size and abs(src_mtime - dst_mtime) < 2:
-                        # 檔案相同，跳過複製
                         self.logger.info(f"    ⏭️ 跳過相同檔案: {item}")
                         should_copy = False
                         operation_type = 'skipped'
                         operation_detail = "檔案內容相同"
-                        # 更新進度
                         if hasattr(self, 'update_progress'):
                             self.update_progress(1)
                     else:
@@ -2243,33 +2550,39 @@ class WebsitePublisher:
                 else:
                     self.logger.info(f"    ➕ 新增檔案: {item}")
                     operation_type = 'new'
-                    src_size = os.path.getsize(src_item)
-                    src_mtime = os.path.getmtime(src_item)
                     operation_detail = f"大小: {src_size} bytes, 修改時間: {datetime.fromtimestamp(src_mtime).strftime('%Y-%m-%d %H:%M:%S')}"
                 
-                # 記錄檔案操作
                 self._record_file_operation(operation_type, relative_path, item, operation_detail)
                 
                 if should_copy:
                     shutil.copy2(src_item, dst_item)
-                    # 更新進度
                     if hasattr(self, 'update_progress'):
                         self.update_progress(1)
                 
-            elif os.path.isdir(src_item):
-                # 目錄處理：遞迴合併
+            elif entry.is_dir(follow_symlinks=False):
+                if changed_dirs is not None and item_relative_path not in changed_dirs:
+                    skipped_count = self._count_dir_files(src_item)
+                    self.logger.info(f"    ⏩ 跳過未變更目錄: {item} ({skipped_count} 個檔案)")
+                    if hasattr(self, 'update_progress'):
+                        self.update_progress(skipped_count)
+                    continue
+
                 if os.path.exists(dst_item):
                     self.logger.info(f"    📁 合併目錄: {item}")
                 else:
                     self.logger.info(f"    📁 建立目錄: {item}")
-                self._merge_directory_to_target(src_item, dst_item, item_relative_path)
+                self._merge_directory_to_target(src_item, dst_item, item_relative_path, changed_dirs)
             
 
                 
-    def load_config(self):
+    def load_config(self, project_name=None):
         try:
-            if os.path.exists('config.json'):
-                with open('config.json', 'r', encoding='utf-8') as f:
+            if project_name is None:
+                project_name = self.current_project_name or '預設專案'
+            self.current_project_name = project_name
+            config_file = os.path.join('configs', f'{project_name}.json')
+            if os.path.exists(config_file):
+                with open(config_file, 'r', encoding='utf-8') as f:
                     loaded_config = json.load(f)
                     # 合併配置，確保新鍵不會丟失
                     for key, value in loaded_config.items():
@@ -2316,6 +2629,7 @@ class WebsitePublisher:
                 
                 # 載入通知人員名單
                 if hasattr(self, 'notify_listbox'):
+                    self.notify_listbox.delete(0, tk.END)
                     for email in self.config.get('notification_emails', []):
                         self.notify_listbox.insert(tk.END, email)
                     
@@ -2330,13 +2644,29 @@ class WebsitePublisher:
                         self.start_countdown()
                     else:
                         self.config['schedule_time'] = None
-                        
+
+                self.root.title(f"網站發布助手 - {self.current_project_name}")
+            else:
+                # 設定檔不存在時清空 GUI
+                if hasattr(self, 'source_listbox'):
+                    self.source_listbox.delete(0, tk.END)
+                    self.delete_listbox.delete(0, tk.END)
+                    self.server_listbox.delete(0, tk.END)
+                if hasattr(self, 'notify_listbox'):
+                    self.notify_listbox.delete(0, tk.END)
+                if hasattr(self, 'update_server_display'):
+                    self.update_server_display()
+                self.root.title(f"網站發布助手 - {self.current_project_name}")
+
         except Exception as e:
             print(f"載入配置失敗: {e}")
             
     def save_config(self):
         try:
-            with open('config.json', 'w', encoding='utf-8') as f:
+            self._ensure_configs_dir()
+            project_name = self.current_project_name or '預設專案'
+            config_file = os.path.join('configs', f'{project_name}.json')
+            with open(config_file, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, ensure_ascii=False, indent=2)
         except Exception as e:
             print(f"儲存配置失敗: {e}")

@@ -1,6 +1,8 @@
 /.claude
 /check_user_info.py
 /config.json
+/configs
+/last_project.json
 /logs
 /test_config.json
 /venv
