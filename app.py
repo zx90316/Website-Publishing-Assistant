@@ -32,6 +32,7 @@ class WebsitePublisher:
             'delete_files': [],
             'servers': [],
             'schedule_time': None,
+            'use_app_offline': True,
             'smtp_config': {
                 'smtp_server': '',
                 'smtp_port': 587,
@@ -178,6 +179,7 @@ class WebsitePublisher:
             'delete_files': [],
             'servers': [],
             'schedule_time': None,
+            'use_app_offline': True,
             'smtp_config': {
                 'smtp_server': '',
                 'smtp_port': 587,
@@ -206,7 +208,7 @@ class WebsitePublisher:
         with open(config_path, 'w', encoding='utf-8') as f:
             json.dump({
                 'source_files': [], 'delete_files': [], 'servers': [],
-                'schedule_time': None,
+                'schedule_time': None, 'use_app_offline': True,
                 'smtp_config': {'smtp_server': '', 'smtp_port': 587, 'username': '', 'password': '', 'use_tls': True},
                 'notification_emails': []
             }, f, ensure_ascii=False, indent=2)
@@ -404,12 +406,31 @@ class WebsitePublisher:
         ttk.Button(server_btn_frame, text="測試連接", command=self.test_server_connection).grid(row=2, column=0, pady=(0, 5))
         ttk.Button(server_btn_frame, text="移除", command=self.remove_server).grid(row=3, column=0)
         
+        # 進階選項
+        advanced_label = ttk.Label(settings_frame, text="進階選項:", font=('Arial', 10, 'bold'))
+        advanced_label.grid(row=6, column=0, sticky=tk.W, pady=(20, 5))
+
+        advanced_frame = ttk.Frame(settings_frame)
+        advanced_frame.grid(row=7, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+
+        self.use_app_offline_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            advanced_frame,
+            text="發布時使用 app_offline.htm（避免 IIS 檔案鎖定）",
+            variable=self.use_app_offline_var,
+            command=self._on_app_offline_changed
+        ).grid(row=0, column=0, sticky=tk.W)
+
         # 設定權重
         source_frame.columnconfigure(0, weight=1)
         delete_frame.columnconfigure(0, weight=1)
         server_frame.columnconfigure(0, weight=1)
         settings_frame.columnconfigure(0, weight=1)
         
+    def _on_app_offline_changed(self):
+        self.config['use_app_offline'] = self.use_app_offline_var.get()
+        self.save_config()
+
     def create_smtp_tab(self, notebook):
         smtp_frame = ttk.Frame(notebook, padding="10")
         notebook.add(smtp_frame, text="郵件通知")
@@ -1550,9 +1571,6 @@ class WebsitePublisher:
             # 顯示發布報告
             self._show_publish_report()
             
-            # 顯示成功訊息
-            self._show_success_message()
-            
         except Exception as e:
             self.logger.error(f"處理發布成功時發生錯誤: {str(e)}")
     
@@ -2060,10 +2078,6 @@ class WebsitePublisher:
             self.logger.error(f"清除歷史記錄失敗: {str(e)}")
             messagebox.showerror("錯誤", f"清除記錄失敗: {str(e)}")
 
-
-    def _show_success_message(self):
-        messagebox.showinfo("成功", "所有伺服器發布完成")
-        
     def _show_error_message(self, error_msg):
         messagebox.showerror("錯誤", f"發布失敗: {error_msg}")
     
@@ -2266,6 +2280,7 @@ class WebsitePublisher:
                     os.makedirs(full_unc_path)
                 
                 # 3. 合併式部署 - 覆蓋衝突檔案，保留其餘檔案
+                app_offline_targets = []
                 for source in self.config['source_files']:
                     if os.path.isfile(source):
                         project_name = os.path.splitext(os.path.basename(source))[0]
@@ -2295,6 +2310,18 @@ class WebsitePublisher:
                         if not os.path.exists(remote_target_dir):
                             self.logger.info(f"  建立目標專案目錄: {remote_target_dir}")
                             os.makedirs(remote_target_dir)
+
+                        # 放置 app_offline.htm 讓 IIS 應用程式離線，釋放檔案鎖定
+                        if self.config.get('use_app_offline', True):
+                            app_offline_path = os.path.join(remote_target_dir, 'app_offline.htm')
+                            app_offline_source = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'app_offline.htm')
+                            if os.path.exists(app_offline_source):
+                                shutil.copy2(app_offline_source, app_offline_path)
+                                app_offline_targets.append(app_offline_path)
+                                self.logger.info(f"  🔒 已放置 app_offline.htm，應用程式離線中...")
+                                time.sleep(1)
+                            else:
+                                self.logger.warning("  ⚠️ 找不到 app_offline.htm 範本，跳過離線步驟")
                         
                         if os.path.isfile(source):
                             # 單一檔案處理 - 直接複製覆蓋
@@ -2373,6 +2400,16 @@ class WebsitePublisher:
                 raise Exception(f"網路連線失敗: {error_message.strip()}")
             
             finally:
+                # 無論成功或失敗，都移除 app_offline.htm 讓應用程式重新上線
+                if app_offline_targets:
+                    for offline_path in app_offline_targets:
+                        try:
+                            if os.path.exists(offline_path):
+                                os.remove(offline_path)
+                                self.logger.info(f"  🔓 已移除 app_offline.htm，應用程式重新上線")
+                        except OSError as e:
+                            self.logger.warning(f"  ⚠️ 移除 app_offline.htm 失敗: {e}")
+
                 # 4. 中斷連線
                 self.logger.info("正在中斷遠端連線...")
                 subprocess.run(disconnection_command, capture_output=True)
@@ -2591,6 +2628,8 @@ class WebsitePublisher:
                     # 確保所有必要的鍵都存在
                     if 'notification_emails' not in self.config:
                         self.config['notification_emails'] = []
+                    if 'use_app_offline' not in self.config:
+                        self.config['use_app_offline'] = True
                     if 'smtp_config' not in self.config:
                         self.config['smtp_config'] = {
                             'smtp_server': '',
@@ -2618,6 +2657,10 @@ class WebsitePublisher:
                 # 更新伺服器顯示
                 self.update_server_display()
                 
+                # 載入 app_offline 設定
+                if hasattr(self, 'use_app_offline_var'):
+                    self.use_app_offline_var.set(self.config.get('use_app_offline', True))
+
                 # 載入SMTP設定
                 smtp_config = self.config.get('smtp_config', {})
                 if hasattr(self, 'smtp_server_var'):
