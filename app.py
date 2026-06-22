@@ -2318,8 +2318,8 @@ class WebsitePublisher:
                             if os.path.exists(app_offline_source):
                                 shutil.copy2(app_offline_source, app_offline_path)
                                 app_offline_targets.append(app_offline_path)
-                                self.logger.info(f"  🔒 已放置 app_offline.htm，應用程式離線中...")
-                                time.sleep(1)
+                                self.logger.info(f"  🔒 已放置 app_offline.htm，等待 IIS 釋放檔案鎖定...")
+                                time.sleep(5)
                             else:
                                 self.logger.warning("  ⚠️ 找不到 app_offline.htm 範本，跳過離線步驟")
                         
@@ -2344,14 +2344,14 @@ class WebsitePublisher:
                                     operation_type = 'updated'
                                     operation_detail = f"大小: {src_size} bytes, 修改時間: {datetime.fromtimestamp(src_mtime).strftime('%Y-%m-%d %H:%M:%S')}"
                                     self.logger.info(f"  🔄 覆蓋檔案: {filename}")
-                                    shutil.copy2(source, target_file)
+                                    self._copy_with_retry(source, target_file)
                             else:
                                 operation_type = 'new'
                                 src_size = os.path.getsize(source)
                                 src_mtime = os.path.getmtime(source)
                                 operation_detail = f"大小: {src_size} bytes, 修改時間: {datetime.fromtimestamp(src_mtime).strftime('%Y-%m-%d %H:%M:%S')}"
                                 self.logger.info(f"  ➕ 新增檔案: {filename}")
-                                shutil.copy2(source, target_file)
+                                self._copy_with_retry(source, target_file)
                             
                             # 記錄檔案操作
                             self._record_file_operation(operation_type, "", filename, operation_detail)
@@ -2419,6 +2419,22 @@ class WebsitePublisher:
             self.logger.error(f"發布到伺服器失敗: {server['ip']} - {str(e)}")
             raise
     
+    def _copy_with_retry(self, src, dst, max_retries=5, retry_delay=3):
+        """複製檔案，遇到權限錯誤時自動重試（等待 IIS 釋放鎖定）"""
+        for attempt in range(max_retries):
+            try:
+                shutil.copy2(src, dst)
+                return
+            except PermissionError:
+                if attempt < max_retries - 1:
+                    self.logger.warning(
+                        f"    ⏳ 檔案被鎖定，等待 {retry_delay} 秒後重試 "
+                        f"({attempt + 1}/{max_retries}): {os.path.basename(dst)}"
+                    )
+                    time.sleep(retry_delay)
+                else:
+                    raise
+
     def _record_file_operation(self, operation_type, relative_path, filename, detail):
         """記錄檔案操作到報告中"""
         if not hasattr(self, 'current_server_key') or not hasattr(self, 'current_project'):
@@ -2592,7 +2608,7 @@ class WebsitePublisher:
                 self._record_file_operation(operation_type, relative_path, item, operation_detail)
                 
                 if should_copy:
-                    shutil.copy2(src_item, dst_item)
+                    self._copy_with_retry(src_item, dst_item)
                     if hasattr(self, 'update_progress'):
                         self.update_progress(1)
                 
