@@ -2419,7 +2419,7 @@ class WebsitePublisher:
             self.logger.error(f"發布到伺服器失敗: {server['ip']} - {str(e)}")
             raise
     
-    def _copy_with_retry(self, src, dst, max_retries=5, retry_delay=3):
+    def _copy_with_retry(self, src, dst, max_retries=10, retry_delay=5):
         """複製檔案，遇到權限錯誤時自動重試（等待 IIS 釋放鎖定）"""
         for attempt in range(max_retries):
             try:
